@@ -1,0 +1,21 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  validate-hacs:
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: "actions/checkout@v4"
+      - name: HACS validation
+        uses: "hacs/action@main"
+        with:
+          category: "integration"
+          # The domain isn't registered in home-assistant/brands, which is optional for
+          # custom integrations installed through HACS.
+          ignore: "brands"

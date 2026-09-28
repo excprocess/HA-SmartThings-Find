@@ -1,0 +1,38 @@
+{
+  "config": {
+    "abort": {
+      "reauth_successful": "Erfolgreich authentifiziert."
+    },
+    "step": {
+      "user": {
+        "title": "SmartThings Find Login",
+        "description": "Login wird vorbereitet..."
+      },
+      "auth_code": {
+        "title": "SmartThings Find Login",
+        "description": "Bitte klicke [hier]({login_url}) um dich anzumelden.\n\nNach der Anmeldung kopiere bitte die volle ms-app:// URL (auch wenn die Seite einen Fehler anzeigt) und füge sie unten ein. Nicht die sichtbare Fehlerseiten-URL einfügen. Wenn der Browser fragt, eine externe App für den ms-app Link zu öffnen, bitte abbrechen.\n\nSo findest du die ms-app URL:\n1) Browser-Tab nach dem Login offen lassen.\n2) Developer Tools (F12) öffnen und Network oder Console ansehen.\n3) Eine URL die mit ms-app:// beginnt komplett kopieren.",
+        "data": {
+          "redirect_url": "Weiterleitungs-URL"
+        }
+      }
+    },
+    "error": {
+      "login_error": "Initialisierung fehlgeschlagen: {error_msg}",
+      "auth_failed": "Authentifizierung fehlgeschlagen: {error_msg}"
+    },
+    "progress": {
+      "task_stage_one": "Vorbereitung läuft, bitte warten...",
+      "task_stage_two": "Zum Anmelden bitte [hier]({url}) klicken, um die Anmeldeseite im Browser zu öffnen. \n\nLink funktioniert nicht? Gehe auf [signin.samsung.com/key](https://signin.samsung.com/key/) und gib den folgenden Code ein:\n\n## ```{code}```\n"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "description": "Abfrageoptionen konfigurieren. Aktive Standortabfragen werden jetzt pro Gerät über den Schalter \"Active Location\" eingestellt.",
+        "data": {
+          "update_interval": "Aktualisierungsintervall (in Sekunden)"
+        }
+      }
+    }
+  }
+}
