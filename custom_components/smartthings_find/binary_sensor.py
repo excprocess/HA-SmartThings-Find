@@ -1,5 +1,5 @@
 import logging
-from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.components.binary_sensor import BinarySensorEntity, BinarySensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -18,6 +18,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     for device in devices:
         if device['data'].get("is_tracker"):
             entities += [DevicePowerSavingSensor(hass, coordinator, device)]
+        if device['data'].get("is_fmm"):
+            entities += [DeviceStalePositionSensor(hass, coordinator, device)]
     async_add_entities(entities)
 
 
@@ -72,4 +74,51 @@ class DevicePowerSavingSensor(BinarySensorEntity):
             'remote_ring': (metadata.get('remoteRing') or {}).get('enabled'),
             'd2d_status': connection.get('d2dStatus'),
             'nearby': connection.get('nearby'),
+        }
+
+
+class DeviceStalePositionSensor(BinarySensorEntity):
+    """Badges an FMM device (phone/tablet/watch/buds/PC) whose shown position can't be
+    trusted as current: either Samsung has told us this device type can't be actively
+    located at all (no network connection of its own - confirmed for earbuds and a
+    non-LTE watch, resultCode=501), or its last known position is older than 3 poll
+    cycles (see position_stale in get_fmm_device_location, utils.py). Uses the "problem"
+    device class so it reads as a warning badge in the frontend without any dashboard
+    setup - "on" means "don't trust this position blindly", not "something is broken".
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_icon = "mdi:map-marker-alert"
+
+    def __init__(self, hass: HomeAssistant, coordinator, device):
+        """Initialize the sensor."""
+        self.coordinator = coordinator
+        device_id = device['data'].get("device_id")
+        name = device['data'].get("name") or device_id or "SmartThings Find"
+        self._attr_unique_id = f"stf_stale_position_{device_id}"
+        self._attr_name = f"{name} Stale Position"
+        self.hass = hass
+        self.device = device['data']
+        self.device_id = device_id
+        self._attr_device_info = device['ha_dev_info']
+
+    def _tag_data(self) -> dict:
+        return self.coordinator.data.get(self.device_id, {}) or {}
+
+    @property
+    def is_on(self) -> bool:
+        tag_data = self._tag_data()
+        return bool(tag_data.get('position_stale')) or not tag_data.get('active_location_supported', True)
+
+    @property
+    def extra_state_attributes(self):
+        tag_data = self._tag_data()
+        return {
+            'position_stale': bool(tag_data.get('position_stale')),
+            'active_location_supported': tag_data.get('active_location_supported'),
+            'reason': (
+                'no_network_connection' if not tag_data.get('active_location_supported', True)
+                else 'position_too_old' if tag_data.get('position_stale')
+                else None
+            ),
         }

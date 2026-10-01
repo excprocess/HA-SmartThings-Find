@@ -12,7 +12,7 @@ import os
 import secrets
 import urllib.parse
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
@@ -30,7 +30,8 @@ from .const import (
     CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_AUTH_SERVER_URL, CONF_USER_ID,
     CONF_IOT_ACCESS_TOKEN, CONF_IOT_REFRESH_TOKEN, CONF_DEVICE_ID,
     CONF_INSTALLED_APP_ID, CONF_ST_USER_UUID,
-    WEB_FIND_CLIENT_ID, WEB_FIND_SCOPE, CONF_USER_AUTH_TOKEN, CONF_LOGIN_ID
+    WEB_FIND_CLIENT_ID, WEB_FIND_SCOPE, CONF_USER_AUTH_TOKEN, CONF_LOGIN_ID,
+    CONF_UPDATE_INTERVAL, CONF_UPDATE_INTERVAL_DEFAULT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1695,6 +1696,7 @@ async def get_fmm_device_location(
     dev_id = dev_data.get('device_id')
     dev_name = dev_data.get('name') or dev_id or "SmartThings Find"
     web_dvce_id = dev_data.get("web_dvce_id")
+    data_store = hass.data[DOMAIN][entry_id]
 
     fail = {
         "dev_name": dev_name,
@@ -1793,6 +1795,20 @@ async def get_fmm_device_location(
         # (sensor.py) since FMM battery data has the same background-wake unreliability
         # as location, so we don't bother parsing CHECK_CONNECTION operations for it.
 
+        # A device that can't be actively woken up (no network of its own - buds, most
+        # watches, PCs when off/asleep) can only ever show whatever it last reported on
+        # its own, which can be hours or days old with nothing wrong going on. Flag that
+        # clearly instead of presenting it identically to a device that just updated,
+        # so a stale position is never mistaken for a fresh one.
+        active_location_supported = not dev_data.get('_active_location_unsupported')
+        gps_date = (used_loc or {}).get("gps_date")
+        position_stale = False
+        if gps_date:
+            update_interval = data_store.get(CONF_UPDATE_INTERVAL, CONF_UPDATE_INTERVAL_DEFAULT)
+            stale_after = timedelta(seconds=max(update_interval * 3, 1800))
+            now = datetime.now(gps_date.tzinfo) if gps_date.tzinfo else datetime.now()
+            position_stale = (now - gps_date) > stale_after
+
         # Extra diagnostic info the website's setLastSelect.do already includes in the
         # same response - no extra request needed. Field semantics beyond their literal
         # names aren't documented anywhere (undocumented API), so these are passed
@@ -1822,6 +1838,8 @@ async def get_fmm_device_location(
             },
             "raw_item": used_op,
             "web_capabilities": web_capabilities,
+            "active_location_supported": active_location_supported,
+            "position_stale": position_stale,
         }
     except ConfigEntryAuthFailed:
         raise

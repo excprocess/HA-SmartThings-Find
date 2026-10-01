@@ -170,6 +170,11 @@ All logic lives in `custom_components/smartthings_find/`:
   `AUT_1708`. Do not re-run that investigation. The coordinator fetches the metadata blob per
   tracker on each poll and stores it under `ble_metadata`.
 
+  `DeviceStalePositionSensor` (FMM devices only) is unrelated to the tag sensor above - it's a
+  `device_class: problem` badge, `is_on` when `position_stale` or `not active_location_supported`
+  on that device's coordinator data (both set in `get_fmm_device_location`, `utils.py`). It reads
+  existing coordinator data, no API call of its own.
+
 - **`const.py`** — all config keys, Samsung client IDs/scopes (`CLIENT_ID_FIND`, `CLIENT_ID_AUTH`,
   `CLIENT_ID_ONECONNECT`, `SCOPE_FIND`, `SCOPE_AUTH`), defaults (e.g.
   `CONF_UPDATE_INTERVAL_DEFAULT = 120`, `RING_TIMEOUT_SECONDS = 120`), and the `BATTERY_LEVELS`

@@ -13,6 +13,12 @@
   the location sensor of Find My Mobile devices.
 - A device that answers "not supported" to Active Location is not retried automatically until the next
   restart, or until its switch is turned off and back on.
+- **Stale Position** binary sensor (Find My Mobile devices): turns on when a device's shown position
+  either can't be actively refreshed at all (buds, most watches, a PC - no network connection of
+  their own) or hasn't updated in over 3 poll cycles, so an old position is never mistaken for a
+  current one. Uses the "problem" device class, so it shows as a warning badge with no dashboard
+  setup needed. The location sensor also carries `active_location_supported` and `position_stale`
+  as plain attributes, for anyone who wants to build their own dashboard logic instead.
 
 ### Changed
 - The two global *active mode* checkboxes in the options are gone. Active Location is now a

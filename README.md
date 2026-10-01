@@ -3,6 +3,17 @@
 Adds Samsung **SmartThings Find** to Home Assistant: SmartTags, and also the phones, tablets,
 watches, earbuds and PCs registered in *Find My Mobile*.
 
+> **This fork, starting from version 8.0.0, was written entirely by AI (Claude Sonnet 5, Anthropic)** —
+> every line of code, the protocol reverse-engineering for Find My Mobile devices, and this
+> documentation. The maintainer (`excprocess`) directed the work, tested every change against a real
+> account and devices, and reported back what worked and what didn't over an extended debugging
+> session; the AI wrote the code. The goal was to pick up a project several previous maintainers had
+> each stepped away from, and bring it up to what current real-world use needed, since none of the
+> other forks currently active did everything this one now does. Said plainly, so nobody mistakes
+> AI-written code for something else: treat this fork accordingly, read the code before trusting it
+> with your account, and see [Contributing](#contributing) if you'd like to help maintain it going
+> forward.
+
 This project is a fork in a long chain: [Vedeneb/HA-SmartThings-Find](https://github.com/Vedeneb/HA-SmartThings-Find)
 (the original, archived by its author) → [herisanuadrian/HA-SmartThings-Find](https://github.com/herisanuadrian/HA-SmartThings-Find)
 → [Rain92/HA-SmartThings-Find](https://github.com/Rain92/HA-SmartThings-Find), which merged the OAuth 2.0/PKCE
@@ -50,6 +61,7 @@ See the [changelog](CHANGELOG.md) for the details.
 | `switch` `<name> Active Location` | Configuration entity. When on, every poll first asks the device for a fresh fix |
 | `button` `<name> Update Location` | Asks the device for a fresh fix right now, and updates only that device |
 | `switch` `<name> Ring` | Phones only (the website shows no ring for the other types) |
+| `binary_sensor` `<name> Stale Position` | Problem badge: on when the device can't be actively located at all, or its position is over 3 poll cycles old |
 
 There is deliberately **no battery sensor** for these devices: Samsung only reports it when the
 device itself answers, so it was almost always stale.
@@ -77,7 +89,9 @@ Read this before opening an issue, most of it comes from how Samsung's service b
 - **Earbuds and watches without their own connection can't be asked.** In testing, earbuds and a
   non-LTE watch answered *not supported* or never answered. The integration stops retrying a device that
   says *not supported* until the next restart. SmartTags reject it too, which is why the switch and button
-  only exist for Find My Mobile devices.
+  only exist for Find My Mobile devices. For these devices, check the **Stale Position** binary sensor
+  rather than assuming the shown position is current - it's on whenever the position either can't be
+  refreshed at all or hasn't updated in a while, so an old fix is never mistaken for a fresh one.
 - **Ring only works for phones**, and only if the phone can be reached.
 
 ## Notes on authentication
@@ -156,9 +170,9 @@ use the website for your tests.
 ### Using HACS
 
 1. Add this repository as a custom repository in HACS (category *Integration*):
-   `https://github.com/YOUR_GITHUB_USER/HA-SmartThings-Find`, or use this button:
+   `https://github.com/excprocess/HA-SmartThings-Find`, or use this button:
 
-   [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=YOUR_GITHUB_USER&repository=HA-SmartThings-Find&category=integration)
+   [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=excprocess&repository=HA-SmartThings-Find&category=integration)
 
 2. Search for "SmartThings Find" in HACS and install it
 3. Restart Home Assistant
@@ -209,6 +223,10 @@ MIT, see [LICENSE](LICENSE). The license and copyright notice of the original pr
 
 ## Credits
 
+- **[excprocess](https://github.com/excprocess)** for directing and testing this fork, every change
+  verified against a real account and real devices before being kept.
+- **Claude Sonnet 5 (Anthropic)** wrote the code and this documentation for version 8.0.0 onward —
+  see the note at the top of this README.
 - **[tomskra](https://github.com/tomskra)** and **[Vedeneb](https://github.com/Vedeneb)** for the original integration.
 - **[herisanuadrian](https://github.com/herisanuadrian)** for keeping the fork alive after the original was archived.
 - **[Rain92](https://github.com/Rain92)** for the fork this one is based on.

@@ -146,6 +146,14 @@ class DeviceLocationSensor(SensorEntity):
         web_capabilities = tag_data.get('web_capabilities')
         if web_capabilities:
             attrs.update(web_capabilities)
+        # Also FMM-only: whether this position can be actively refreshed at all (some
+        # device types have no network connection of their own to push a fix to - see
+        # binary_sensor.py's Stale Position sensor, which badges this visually) and
+        # whether it's old enough to no longer be trusted as current.
+        if 'active_location_supported' in tag_data:
+            attrs['active_location_supported'] = tag_data.get('active_location_supported')
+        if 'position_stale' in tag_data:
+            attrs['position_stale'] = tag_data.get('position_stale')
         return attrs
 
 
