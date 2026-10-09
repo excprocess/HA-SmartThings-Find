@@ -281,7 +281,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
             failed_tag_data['next_update_at'] = datetime.now(timezone.utc) + timedelta(
                         seconds=min(self.away_interval, self.in_zone_interval)
                     )
-                    failed_tag_data['next_update_mode'] = 'passive'
+            failed_tag_data['next_update_mode'] = 'passive'
                     if (
                         failures <= MAX_STALE_FALLBACK_CYCLES
                         and prev_tag_data
