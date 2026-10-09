@@ -5,6 +5,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import EntityCategory
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .utils import google_maps_url
@@ -134,11 +135,17 @@ class DeviceLocationSensor(SensorEntity):
         used_loc = self._used_loc()
         latitude = used_loc.get('latitude')
         longitude = used_loc.get('longitude')
+        last_seen = used_loc.get('gps_date')
+        last_seen_local = dt_util.as_local(last_seen) if last_seen else None
         attrs = {
             'latitude': latitude,
             'longitude': longitude,
             'gps_accuracy': used_loc.get('gps_accuracy'),
-            'last_seen': used_loc.get('gps_date'),
+            'last_seen': last_seen,
+            'last_seen_local': (
+                last_seen_local.strftime("%Y-%m-%d %H:%M:%S %Z")
+                if last_seen_local else None
+            ),
             'google_maps_url': google_maps_url(latitude, longitude),
         }
         # Only present for FMM devices (phone/wearable) - straight from the website's

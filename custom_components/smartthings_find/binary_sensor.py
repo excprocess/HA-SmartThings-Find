@@ -78,13 +78,11 @@ class DevicePowerSavingSensor(BinarySensorEntity):
 
 
 class DeviceStalePositionSensor(BinarySensorEntity):
-    """Badges an FMM device (phone/tablet/watch/buds/PC) whose shown position can't be
-    trusted as current: either Samsung has told us this device type can't be actively
-    located at all (no network connection of its own - confirmed for earbuds and a
-    non-LTE watch, resultCode=501), or its last known position is older than 3 poll
-    cycles (see position_stale in get_fmm_device_location, utils.py). Uses the "problem"
-    device class so it reads as a warning badge in the frontend without any dashboard
-    setup - "on" means "don't trust this position blindly", not "something is broken".
+    """Report errors while retrieving an FMM device's location.
+
+    Position age remains informational on the Location sensor and does not turn this
+    entity on. This entity instead surfaces failed requests, unreadable/encrypted data,
+    and failed active-location requests.
     """
 
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
@@ -96,7 +94,7 @@ class DeviceStalePositionSensor(BinarySensorEntity):
         device_id = device['data'].get("device_id")
         name = device['data'].get("name") or device_id or "SmartThings Find"
         self._attr_unique_id = f"stf_stale_position_{device_id}"
-        self._attr_name = f"{name} Stale Position"
+        self._attr_name = f"{name} Location Retrieval Error"
         self.hass = hass
         self.device = device['data']
         self.device_id = device_id
@@ -108,7 +106,15 @@ class DeviceStalePositionSensor(BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         tag_data = self._tag_data()
-        return bool(tag_data.get('position_stale')) or not tag_data.get('active_location_supported', True)
+        return bool(self._error_message(tag_data))
+
+    @staticmethod
+    def _error_message(tag_data: dict) -> str | None:
+        return (
+            tag_data.get('fetch_error')
+            or tag_data.get('active_location_error')
+            or tag_data.get('position_error')
+        )
 
     @property
     def extra_state_attributes(self):
@@ -116,9 +122,9 @@ class DeviceStalePositionSensor(BinarySensorEntity):
         return {
             'position_stale': bool(tag_data.get('position_stale')),
             'active_location_supported': tag_data.get('active_location_supported'),
-            'reason': (
-                'no_network_connection' if not tag_data.get('active_location_supported', True)
-                else 'position_too_old' if tag_data.get('position_stale')
-                else None
-            ),
+            'error': self._error_message(tag_data),
+            'fetch_error': tag_data.get('fetch_error'),
+            'active_location_error': tag_data.get('active_location_error'),
+            'position_error': tag_data.get('position_error'),
+            'consecutive_fetch_failures': tag_data.get('consecutive_fetch_failures', 0),
         }

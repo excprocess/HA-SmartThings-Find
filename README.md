@@ -54,7 +54,7 @@ See the [changelog](CHANGELOG.md) for the details.
 |---|---|
 | `device_tracker` | Location of the tag |
 | `sensor` Battery | Battery level |
-| `sensor` `<name> Location` | `latitude, longitude`, with `latitude`, `longitude`, `gps_accuracy`, `last_seen`, `google_maps_url` attributes |
+| `sensor` `<name> Location` | `latitude, longitude`, with `latitude`, `longitude`, `gps_accuracy`, `last_seen` (timestamp), `last_seen_local` (local time, readable), and `google_maps_url` attributes |
 | `sensor` `<name> Maps Link` | Google Maps URL (Diagnostic) |
 | `switch` `<name> Ring` | Optimistic ring toggle, turns itself off after 120 s |
 | `binary_sensor` `<name> Power Saving` | Read-only, with firmware, model, battery and connection state as attributes |
@@ -68,7 +68,7 @@ See the [changelog](CHANGELOG.md) for the details.
 | `switch` `<name> Active Location` | Configuration entity. When on, every poll first asks the device for a fresh fix |
 | `button` `<name> Update Location` | Asks the device for a fresh fix right now, and updates only that device |
 | `switch` `<name> Ring` | Phones only (the website shows no ring for the other types) |
-| `binary_sensor` `<name> Stale Position` | Problem badge: on when the device can't be actively located at all, or its position is over 3 of its own polling intervals old (never under 30 minutes) |
+| `binary_sensor` `<name> Location Retrieval Error` | Problem badge: on when Samsung's location request fails, the response contains no readable position, or an explicitly requested active location fails. The `error` attribute explains why. |
 
 There is deliberately **no battery sensor** for these devices: Samsung only reports it when the
 device itself answers, so it was almost always stale.
@@ -96,15 +96,16 @@ Read this before opening an issue, most of it comes from how Samsung's service b
 - **Earbuds and watches without their own connection can't be asked.** In testing, earbuds and a
   non-LTE watch answered *not supported* or never answered. The integration stops retrying a device that
   says *not supported* until the next restart. SmartTags reject it too, which is why the switch and button
-  only exist for Find My Mobile devices. For these devices, check the **Stale Position** binary sensor
-  rather than assuming the shown position is current - it's on whenever the position either can't be
-  refreshed at all or hasn't updated in a while, so an old fix is never mistaken for a fresh one.
+  only exist for Find My Mobile devices. The **Location Retrieval Error** binary sensor reports failed
+  requests and unreadable responses. Position age remains visible as the `position_stale` attribute on
+  the Location sensor; age alone does not turn the error sensor on.
 - **Ring only works for phones**, and only if the phone can be reached.
 - **Positions reported by nearby devices.** A watch, PC or earbuds that nobody asks can still get a new
   position when another Galaxy device passes close to it. It shows up here when Samsung returns it in
   the clear. If Samsung returns it end-to-end encrypted it can't be read (the same limit as
   [samsung-re-find](https://github.com/charlesbel/samsung-re-find)): the device then stays available with
-  its last known position, flagged by *Stale Position*, and the log says so once. If an entry is skipped for
+  its last known position, and the **Location Retrieval Error** entity explains that it could not be
+  decoded. If an entry is skipped for
   any other reason, the log shows its shape (never its coordinates) once per device: look for
   `Skipped a ... entry from Samsung`, that line is what makes a bug report actionable.
 

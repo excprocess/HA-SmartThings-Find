@@ -264,6 +264,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                     failures = dev_data.get('_consecutive_fetch_failures', 0) + 1
                     dev_data['_consecutive_fetch_failures'] = failures
                     prev_tag_data = previous.get(dev_data['device_id'])
+                    failed_tag_data = tag_data
                     if (
                         failures <= MAX_STALE_FALLBACK_CYCLES
                         and prev_tag_data
@@ -273,7 +274,11 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                             "[%s] Fetch failed this cycle (%s/%s) - keeping last known position",
                             dev_name, failures, MAX_STALE_FALLBACK_CYCLES,
                         )
-                        tag_data = prev_tag_data
+                        tag_data = dict(prev_tag_data)
+                        tag_data['fetch_error'] = failed_tag_data.get(
+                            'fetch_error', 'Location fetch failed'
+                        )
+                        tag_data['consecutive_fetch_failures'] = failures
                     elif failures > MAX_STALE_FALLBACK_CYCLES:
                         _LOGGER.warning(
                             "[%s] Fetch has failed %s cycles in a row - showing as unavailable "

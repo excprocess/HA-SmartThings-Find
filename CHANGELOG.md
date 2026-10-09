@@ -1,5 +1,25 @@
 # Changelog
 
+## 8.1.1
+
+### Changed
+- Removed duplicated and API-internal attributes from device trackers. Coordinates, accuracy,
+  last-seen time, and the Maps URL remain available through the dedicated Location and Maps Link
+  sensors; the tracker continues to provide its GPS position and accuracy to Home Assistant for
+  zone detection.
+- Reworked the Find My Mobile **Location Retrieval Error** entity to report request failures,
+  unreadable or encrypted location responses, and failed active-location requests. A position being
+  old by itself no longer turns this error entity on; its age remains visible on the Location sensor.
+- Added the `last_seen_local` Location sensor attribute with the position timestamp formatted in
+  Home Assistant's configured local time zone; the original `last_seen` timestamp is preserved.
+
+### Fixed
+- Passive location parsing now falls back to `encLocation` when the top-level coordinates are empty
+  or malformed, which can otherwise discard a readable position supplied by Samsung's nearby-device
+  network.
+- Location errors remain visible on the diagnostic entity while the integration briefly preserves a
+  last-known position after a transient request failure.
+
 ## 8.1.0
 
 ### Added

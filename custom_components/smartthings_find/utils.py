@@ -1084,7 +1084,9 @@ def _report_skip_once(dev_name: str, op: dict, reason: str, level: int = logging
     )
 
 
-def extract_best_location(operations: list, dev_name: str) -> tuple[dict | None, dict | None]:
+def extract_best_location(
+    operations: list, dev_name: str, diagnostics: dict | None = None
+) -> tuple[dict | None, dict | None]:
     """
     Extracts the newest usable location from the list of operations.
     Returns (used_op, used_loc), or (None, None) when there is none.
@@ -1106,23 +1108,30 @@ def extract_best_location(operations: list, dev_name: str) -> tuple[dict | None,
             continue
 
         source = op
-        if op.get("latitude") is None:
+        lat = _to_float(source.get("latitude"))
+        lon = _to_float(source.get("longitude"))
+        if lat is None or lon is None:
             nested = op.get("encLocation")
             if isinstance(nested, dict):
                 if nested.get("encrypted"):
                     saw_encrypted = True
+                    if diagnostics is not None:
+                        diagnostics["encrypted"] = True
                     _LOGGER.debug("[%s] Ignoring encrypted %s location", dev_name, op_type)
                     continue
                 source = nested
+                lat = _to_float(source.get("latitude"))
+                lon = _to_float(source.get("longitude"))
             elif nested:
                 # Present but not an object (e.g. an opaque encrypted blob): unreadable here.
                 saw_encrypted = True
+                if diagnostics is not None:
+                    diagnostics["encrypted"] = True
                 _report_skip_once(dev_name, op, "encLocation is not a readable object")
                 continue
-
-        lat = _to_float(source.get("latitude"))
-        lon = _to_float(source.get("longitude"))
         if lat is None or lon is None:
+            if diagnostics is not None:
+                diagnostics.setdefault("skipped", set()).add("no_usable_coordinates")
             # Routine for operations that carry no position at all (e.g. a failed request).
             _report_skip_once(dev_name, op, "no usable coordinates", level=logging.INFO)
             continue
@@ -1131,6 +1140,8 @@ def extract_best_location(operations: list, dev_name: str) -> tuple[dict | None,
         utc_date = _parse_stf_date_safe(
             extra.get("gpsUtcDt") or source.get("gpsUtcDt") or op.get("gpsUtcDt"))
         if utc_date is None:
+            if diagnostics is not None:
+                diagnostics.setdefault("skipped", set()).add("no_usable_date")
             # The fix has coordinates but no timestamp of its own: use the time Samsung
             # recorded the operation rather than throw a real position away.
             for key in ("oprnDoneDate", "oprnCrtDate"):
@@ -1781,14 +1792,17 @@ async def get_fmm_device_location(
         "dev_id": dev_id,
         "update_success": False,
         "location_found": False,
+        "fetch_error": None,
+        "position_error": None,
     }
 
     if not web_dvce_id:
         # Not an error - the name-matching enrichment step just hasn't resolved this
         # device yet (or the web bridge is unavailable this cycle).
         _LOGGER.debug("[%s] No website device id resolved yet, cannot fetch FMM location", dev_name)
-        return {**fail, "update_success": True}
+        return {**fail, "update_success": True, "fetch_error": "Website device ID is not resolved"}
 
+    active_location_error = None
     if dev_data.get('_active_location_unsupported'):
         # Samsung explicitly rejected LOCATION for this device as unsupported
         # (resultCode=501 - seen consistently for buds/non-LTE watches, which have no
@@ -1809,6 +1823,10 @@ async def get_fmm_device_location(
         active_success, active_reason = await perform_fmm_operation(
             hass, session, entry_id, dev_data, "LOCATION"
         )
+        active_location_error = None if active_success else (
+            f"Samsung active location request failed (resultCode={active_reason})"
+            if active_reason else "Samsung did not complete the active location request (timeout or no response)"
+        )
         if not active_success and active_reason == "501":
             dev_data['_active_location_unsupported'] = True
             _LOGGER.info(
@@ -1819,11 +1837,12 @@ async def get_fmm_device_location(
         # Whether or not it succeeded/timed out, fall through to the normal passive read
         # below - extract_best_location() picks the newest fix regardless of how the
         # freshest one got there, and a passive read still returns the best data we have.
+    fail["active_location_error"] = active_location_error
 
     async def _fetch(force_refresh: bool):
         jsessionid, csrf = await get_web_session_cookie(hass, session, entry_id, force_refresh=force_refresh)
         if not jsessionid or not csrf:
-            return None, None, None
+            return None, None
         web_client = await _get_web_client(hass, entry_id)
         async with web_client.post(
             "https://smartthingsfind.samsung.com/device/setLastSelect.do",
@@ -1835,44 +1854,40 @@ async def get_fmm_device_location(
             status = res.status
             if status == 200:
                 body = await res.json(content_type=None)
-                raw_text = None
             else:
                 body = None
-                # Grab the raw body on failure (truncated) so we can tell a rate-limit/
-                # block page apart from a genuine session/auth problem next time this happens.
-                try:
-                    raw_text = (await res.text())[:300]
-                except Exception:
-                    raw_text = None
-        return status, body, raw_text
+        return status, body
 
     try:
-        status, body, raw_text = await _fetch(False)
+        status, body = await _fetch(False)
         if status != 200 or body is None:
             # The cached web session may have gone stale - bootstrap a fresh one and retry once.
-            status, body, raw_text = await _fetch(True)
+            status, body = await _fetch(True)
         if status != 200 or body is None:
             _LOGGER.warning(
-                "[%s] FMM location fetch failed (http_status=%s) response_snippet=%r",
-                dev_name, status, raw_text,
+                "[%s] FMM location fetch failed (http_status=%s)",
+                dev_name, status,
             )
-            return fail
+            reason = "Samsung Find web session is unavailable" if status is None else f"HTTP status {status}"
+            return {**fail, "fetch_error": f"Samsung Find location request failed: {reason}"}
         if not isinstance(body, dict):
             _LOGGER.warning(
                 "[%s] FMM location fetch returned an unexpected payload (%s)", dev_name, type(body).__name__)
-            return fail
+            return {**fail, "fetch_error": f"Unexpected Samsung response format: {type(body).__name__}"}
         if body.get("resultCode") not in (None, "00"):
             _LOGGER.warning("[%s] FMM location fetch rejected: resultCode=%s", dev_name, body.get("resultCode"))
-            return fail
+            return {**fail, "fetch_error": f"Samsung rejected the location request (resultCode={body.get('resultCode')})"}
 
         # From here on the read itself has worked. What's in the answer is a separate
         # question: an entry we can't make sense of must never turn the device Unavailable
         # (update_success is about reaching Samsung, not about how clean its data is).
         operations = body.get("operation")
         if not isinstance(operations, list):
+            _LOGGER.warning("[%s] Samsung location response has no operation list", dev_name)
             operations = []
+        location_diagnostics = {}
         try:
-            used_op, used_loc = extract_best_location(operations, dev_name)
+            used_op, used_loc = extract_best_location(operations, dev_name, location_diagnostics)
         except Exception:
             # extract_best_location is written not to raise. If it ever does, that's a gap
             # in how we read Samsung's data, so say so once and carry on with what we knew.
@@ -1882,6 +1897,18 @@ async def get_fmm_device_location(
                     "[%s] Couldn't interpret the location data Samsung returned, showing the last "
                     "known position instead", dev_name, exc_info=True)
             used_op, used_loc = None, None
+            location_diagnostics["parser_error"] = True
+
+        position_error = None
+        if not used_loc:
+            if location_diagnostics.get("parser_error"):
+                position_error = "The integration could not interpret Samsung's location data"
+            elif location_diagnostics.get("encrypted"):
+                position_error = "Samsung returned only end-to-end encrypted locations; this integration cannot decode them"
+            elif location_diagnostics.get("skipped"):
+                position_error = "Samsung returned location entries without usable coordinates or timestamps"
+            else:
+                position_error = "Samsung returned no readable location for this device"
 
         if used_loc:
             dev_data['_last_good_loc'] = (used_op, used_loc)
@@ -1939,6 +1966,9 @@ async def get_fmm_device_location(
             "dev_name": dev_name,
             "dev_id": web_dvce_id,
             "update_success": True,
+            "fetch_error": None,
+            "position_error": position_error,
+            "active_location_error": active_location_error,
             "location_found": bool(
                 used_loc and used_loc.get("latitude") is not None and used_loc.get("longitude") is not None
             ),
@@ -1954,7 +1984,7 @@ async def get_fmm_device_location(
         raise
     except Exception as e:
         _LOGGER.error("[%s] Exception fetching FMM location: %s", dev_name, e, exc_info=True)
-        return fail
+        return {**fail, "fetch_error": f"Location request failed: {type(e).__name__}"}
 
 
 async def get_device_location(hass: HomeAssistant, session: aiohttp.ClientSession, dev_data: dict, entry_id: str) -> dict:
