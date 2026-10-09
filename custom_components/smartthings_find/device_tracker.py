@@ -122,6 +122,19 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity):
         """
         tag_data = self.coordinator.data.get(self.device_id, {}) or {}
         redundant = {
+            "is_tracker",
+            "is_fmm",
+            "original_name",
+            "device_id",
+            "fmm_device_id",
+            "st_device_id",
+            "owner_id",
+            "sa_guid",
+            "share_geolocation",
+            "mutual_agreement",
+            "web_dvce_id",
+            "web_usr_id",
+            "web_device_type_code",
             "used_loc",
             "latitude",
             "longitude",
@@ -139,17 +152,19 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity):
             "active_location_error",
             "consecutive_fetch_failures",
             "next_update_at",
+            "fmm_request_history",
+            "next_poll",
         }
         attrs = {
             key: value
             for key, value in self.device.items()
-            if key != "raw_device" and key not in redundant
+            if key != "raw_device" and key not in redundant and not key.startswith("_")
         }
         attrs.update(
             {
                 key: value
                 for key, value in tag_data.items()
-                if key != "raw_item" and key not in redundant
+                if key != "raw_item" and key not in redundant and not key.startswith("_")
             }
         )
         used_loc = tag_data.get("used_loc") or {}

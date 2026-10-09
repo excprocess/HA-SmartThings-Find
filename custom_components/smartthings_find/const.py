@@ -20,6 +20,9 @@ CONF_UPDATE_INTERVAL_IN_ZONE = "update_interval_in_zone"
 CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT = 0
 MIN_UPDATE_INTERVAL = 30
 
+# Keep location fixes even when this uncertain, but flag them for the user.
+LOW_ACCURACY_THRESHOLD_M = 100
+
 RING_TIMEOUT_SECONDS = 120
 
 CLIENT_ID_FIND = "27zmg0v1oo"

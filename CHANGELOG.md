@@ -1,5 +1,12 @@
 # Changelog
 
+## 8.1.3
+
+### Fixed
+- Removed redundant FMM tracker fields and private Samsung/account identifiers, including the raw monotonic poll counter; readable `next_update_local` remains available.
+- Toggling Active Location now triggers an immediate refresh for any FMM device instead of waiting for its next scheduled poll.
+- Location Retrieval Error now refreshes with coordinator updates and reports low-confidence positions over 100 m without discarding those positions.
+
 ## 8.1.2
 
 ### Added

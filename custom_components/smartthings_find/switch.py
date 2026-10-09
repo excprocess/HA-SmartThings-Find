@@ -22,12 +22,13 @@ async def async_setup_entry(
 ) -> None:
     """Set up SmartThings Find switch entities."""
     devices = hass.data[DOMAIN][entry.entry_id]["devices"]
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     entities = []
     for device in devices:
         if device["data"].get("is_tracker"):
             entities.append(RingSwitch(hass, entry.entry_id, device))
         if device["data"].get("is_fmm"):
-            entities.append(ActiveLocationSwitch(hass, entry.entry_id, device))
+            entities.append(ActiveLocationSwitch(hass, entry.entry_id, device, coordinator))
             if device["data"].get("web_device_type_code") in ("PHONE", "PHONE DEVICE"):
                 # Ring is only exposed by the website itself for phones - watches/buds/PC
                 # don't show a ring control there either (buds/watches also empirically 501
@@ -226,9 +227,10 @@ class ActiveLocationSwitch(SwitchEntity, RestoreEntity):
     (dev_data['active_location_requested']) so the coordinator's fetch functions, which
     only see that dict rather than this entity, can read it on every cycle."""
 
-    def __init__(self, hass: HomeAssistant, entry_id: str, device: dict) -> None:
+    def __init__(self, hass: HomeAssistant, entry_id: str, device: dict, coordinator) -> None:
         self.hass = hass
         self.entry_id = entry_id
+        self.coordinator = coordinator
         self.device = device["data"]
         device_id = self.device.get("device_id")
         name = self.device.get("name") or device_id or "SmartThings Find"
@@ -259,8 +261,15 @@ class ActiveLocationSwitch(SwitchEntity, RestoreEntity):
         # signal to retry, not just another automatic cycle.
         self.device.pop('_active_location_unsupported', None)
         self.async_write_ha_state()
+        await self._request_immediate_poll()
 
     async def async_turn_off(self, **kwargs) -> None:
         self._is_on = False
         self.device["active_location_requested"] = False
         self.async_write_ha_state()
+        await self._request_immediate_poll()
+
+    async def _request_immediate_poll(self) -> None:
+        """Apply the mode change immediately, not at the next scheduled interval."""
+        self.device['_next_poll'] = 0
+        await self.coordinator.async_request_refresh()

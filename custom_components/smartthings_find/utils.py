@@ -31,7 +31,7 @@ from .const import (
     CONF_IOT_ACCESS_TOKEN, CONF_IOT_REFRESH_TOKEN, CONF_DEVICE_ID,
     CONF_INSTALLED_APP_ID, CONF_ST_USER_UUID,
     WEB_FIND_CLIENT_ID, WEB_FIND_SCOPE, CONF_USER_AUTH_TOKEN, CONF_LOGIN_ID,
-    CONF_UPDATE_INTERVAL_DEFAULT,
+    CONF_UPDATE_INTERVAL_DEFAULT, LOW_ACCURACY_THRESHOLD_M,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -2077,6 +2077,56 @@ async def get_fmm_device_location(
                 position_error = "Samsung returned location entries without usable coordinates or timestamps"
             else:
                 position_error = "Samsung returned no readable location for this device"
+
+        previous_good = dev_data.get('_last_good_loc')
+        previous_gps_date = (
+            (previous_good[1] or {}).get('gps_date')
+            if isinstance(previous_good, tuple) and len(previous_good) == 2
+            else None
+        )
+        gps_accuracy = (used_loc or {}).get('gps_accuracy')
+        low_accuracy = gps_accuracy is not None and gps_accuracy > LOW_ACCURACY_THRESHOLD_M
+        if low_accuracy:
+            position_error = (
+                f"Samsung returned a position with low accuracy ({gps_accuracy:.1f} m; "
+                f"warning threshold {LOW_ACCURACY_THRESHOLD_M} m)"
+            )
+
+        current_gps_date = (used_loc or {}).get('gps_date')
+        received_new_fix = bool(used_loc)
+        if received_new_fix and previous_gps_date:
+            received_new_fix = current_gps_date > previous_gps_date
+        if request_history is not None:
+            response_has_coordinates = any(
+                isinstance(op, dict) and (
+                    (op.get('latitude') is not None and op.get('longitude') is not None)
+                    or (
+                        isinstance(op.get('encLocation'), dict)
+                        and op['encLocation'].get('latitude') is not None
+                        and op['encLocation'].get('longitude') is not None
+                    )
+                )
+                for op in operations
+            )
+            _record_fmm_request(
+                request_history,
+                "location_result",
+                outcome=(
+                    "low_accuracy" if low_accuracy
+                    else "position_updated" if received_new_fix
+                    else "no_new_fix"
+                ),
+                details={
+                    "position_time": current_gps_date.isoformat() if current_gps_date else None,
+                    "position_age_seconds": max(
+                        0, int((datetime.now(pytz.UTC) - current_gps_date).total_seconds())
+                    ) if current_gps_date else None,
+                    "response_contains_coordinates": response_has_coordinates,
+                    "gps_accuracy_m": gps_accuracy,
+                    "accuracy_warning_threshold_m": LOW_ACCURACY_THRESHOLD_M,
+                    "position_updated": received_new_fix,
+                },
+            )
 
         if used_loc:
             dev_data['_last_good_loc'] = (used_op, used_loc)

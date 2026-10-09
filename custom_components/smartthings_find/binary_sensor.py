@@ -3,6 +3,7 @@ from homeassistant.components.binary_sensor import BinarySensorEntity, BinarySen
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .utils import get_power_saving_state
@@ -77,7 +78,7 @@ class DevicePowerSavingSensor(BinarySensorEntity):
         }
 
 
-class DeviceStalePositionSensor(BinarySensorEntity):
+class DeviceStalePositionSensor(CoordinatorEntity, BinarySensorEntity):
     """Report errors while retrieving an FMM device's location.
 
     Position age remains informational on the Location sensor and does not turn this
@@ -90,6 +91,7 @@ class DeviceStalePositionSensor(BinarySensorEntity):
 
     def __init__(self, hass: HomeAssistant, coordinator, device):
         """Initialize the sensor."""
+        super().__init__(coordinator)
         self.coordinator = coordinator
         device_id = device['data'].get("device_id")
         name = device['data'].get("name") or device_id or "SmartThings Find"

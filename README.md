@@ -65,10 +65,10 @@ See the [changelog](CHANGELOG.md) for the details.
 |---|---|
 | `device_tracker` | Location of the device, with `last_seen_local`, `next_update_local`, and `next_update_mode` attributes |
 | `sensor` `<name> Location` / `Maps Link` | Same as for tags, plus `telephony_support`, `wifi_only`, `cdma`, `ring_supported`, `offline_find_supported` attributes as Samsung reports them, and `in_zone` / `polling_interval` (the schedule the device is on) |
-| `switch` `<name> Active Location` | Configuration entity. When on, every poll first asks the device for a fresh fix |
+| `switch` `<name> Active Location` | Configuration entity. Toggling it requests a poll immediately; later polls ask the device for a fresh fix first |
 | `button` `<name> Update Location` | Asks the device for a fresh fix right now, and updates only that device |
 | `switch` `<name> Ring` | Phones only (the website shows no ring for the other types) |
-| `binary_sensor` `<name> Location Retrieval Error` | Problem badge for retrieval errors; attributes include the explanation and a bounded history of sanitized Find My Mobile request/response summaries. |
+| `binary_sensor` `<name> Location Retrieval Error` | Updated on each poll; reports failed requests, missing newer positions, and accuracy over 100 m without discarding the returned fix. |
 
 There is deliberately **no battery sensor** for these devices: Samsung only reports it when the
 device itself answers, so it was almost always stale.
