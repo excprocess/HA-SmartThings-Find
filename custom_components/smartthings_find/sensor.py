@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -137,15 +138,26 @@ class DeviceLocationSensor(SensorEntity):
         longitude = used_loc.get('longitude')
         last_seen = used_loc.get('gps_date')
         last_seen_local = dt_util.as_local(last_seen) if last_seen else None
+        next_update_at = tag_data.get('next_update_at')
+        next_update_local = (
+            dt_util.as_local(next_update_at)
+            if isinstance(next_update_at, datetime)
+            else None
+        )
         attrs = {
             'latitude': latitude,
             'longitude': longitude,
             'gps_accuracy': used_loc.get('gps_accuracy'),
             'last_seen': last_seen,
             'last_seen_local': (
-                last_seen_local.strftime("%Y-%m-%d %H:%M:%S %Z")
+                last_seen_local.strftime("%Y-%m-%d %H:%M:%S %Z %z")
                 if last_seen_local else None
             ),
+            'next_update_local': (
+                next_update_local.strftime("%Y-%m-%d %H:%M:%S %Z %z")
+                if next_update_local else None
+            ),
+            'next_update_mode': tag_data.get('next_update_mode'),
             'google_maps_url': google_maps_url(latitude, longitude),
         }
         # Only present for FMM devices (phone/wearable) - straight from the website's

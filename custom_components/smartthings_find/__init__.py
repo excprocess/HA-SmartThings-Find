@@ -9,6 +9,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -212,6 +213,19 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         interval = self.in_zone_interval if in_zone else self.away_interval
         dev_data['_poll_interval_s'] = interval
         dev_data['_next_poll'] = now + interval
+        seconds_until_next_poll = max(0, dev_data['_next_poll'] - time.monotonic())
+        tag_data['next_update_at'] = dt_util.utcnow() + timedelta(
+            seconds=seconds_until_next_poll
+        )
+        tag_data['next_update_mode'] = (
+            'active'
+            if dev_data.get('is_fmm')
+            and dev_data.get('active_location_requested')
+            and dev_data.get('web_dvce_id')
+            and not dev_data.get('_active_location_unsupported')
+            and not dev_data.get('_consecutive_fetch_failures')
+            else 'passive'
+        )
         # Shown on the location sensor, so you can see which schedule a device is on.
         tag_data['in_zone'] = in_zone
         tag_data['polling_interval'] = interval
@@ -265,6 +279,10 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                     dev_data['_consecutive_fetch_failures'] = failures
                     prev_tag_data = previous.get(dev_data['device_id'])
                     failed_tag_data = tag_data
+                    failed_tag_data['next_update_at'] = dt_util.utcnow() + timedelta(
+                        seconds=min(self.away_interval, self.in_zone_interval)
+                    )
+                    failed_tag_data['next_update_mode'] = 'passive'
                     if (
                         failures <= MAX_STALE_FALLBACK_CYCLES
                         and prev_tag_data
@@ -279,6 +297,11 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                             'fetch_error', 'Location fetch failed'
                         )
                         tag_data['consecutive_fetch_failures'] = failures
+                        tag_data['next_update_at'] = failed_tag_data['next_update_at']
+                        tag_data['next_update_mode'] = failed_tag_data['next_update_mode']
+                        tag_data['fmm_request_history'] = failed_tag_data.get(
+                            'fmm_request_history', tag_data.get('fmm_request_history', [])
+                        )
                     elif failures > MAX_STALE_FALLBACK_CYCLES:
                         _LOGGER.warning(
                             "[%s] Fetch has failed %s cycles in a row - showing as unavailable "

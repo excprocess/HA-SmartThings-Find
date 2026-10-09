@@ -1,5 +1,13 @@
 # Changelog
 
+## 8.1.2
+
+### Added
+- The **Location Retrieval Error** entity now includes a bounded history of Find My Mobile request
+  summaries, including HTTP status, Samsung result codes, operation status, and session-bootstrap
+  outcomes. Raw response bodies, coordinates, authorization codes, cookies, and CSRF values are not
+  stored in these attributes.
+
 ## 8.1.1
 
 ### Changed
@@ -10,10 +18,14 @@
 - Reworked the Find My Mobile **Location Retrieval Error** entity to report request failures,
   unreadable or encrypted location responses, and failed active-location requests. A position being
   old by itself no longer turns this error entity on; its age remains visible on the Location sensor.
-- Added the `last_seen_local` Location sensor attribute with the position timestamp formatted in
-  Home Assistant's configured local time zone; the original `last_seen` timestamp is preserved.
+- Added the `last_seen_local` attribute to the device tracker and Location sensor, formatting the
+  position timestamp in Home Assistant's configured time zone; the Location sensor's original
+  `last_seen` timestamp is preserved.
+- Added `next_update_local` and `next_update_mode` attributes to show the scheduled next poll time
+  in Home Assistant's time zone and whether that cycle will use active or passive location.
 
 ### Fixed
+- Galaxy Buds now use Samsung Find's pair icon when Samsung leaves `icon_url` empty.
 - Passive location parsing now falls back to `encLocation` when the top-level coordinates are empty
   or malformed, which can otherwise discard a readable position supplied by Samsung's nearby-device
   network.

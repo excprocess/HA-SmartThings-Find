@@ -127,4 +127,5 @@ class DeviceStalePositionSensor(BinarySensorEntity):
             'active_location_error': tag_data.get('active_location_error'),
             'position_error': tag_data.get('position_error'),
             'consecutive_fetch_failures': tag_data.get('consecutive_fetch_failures', 0),
+            'fmm_request_history': tag_data.get('fmm_request_history', []),
         }

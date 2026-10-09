@@ -4,7 +4,7 @@
   "after_dependencies": [
     "http"
   ],
-  "version": "8.1.1",
+  "version": "8.1.2",
   "documentation": "https://github.com/excprocess/HA-SmartThings-Find",
   "issue_tracker": "https://github.com/excprocess/HA-SmartThings-Find/issues",
   "integration_type": "hub",

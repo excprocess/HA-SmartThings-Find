@@ -52,9 +52,9 @@ See the [changelog](CHANGELOG.md) for the details.
 
 | Entity | Notes |
 |---|---|
-| `device_tracker` | Location of the tag |
+| `device_tracker` | Location of the tag, with `last_seen_local`, `next_update_local`, and `next_update_mode` attributes |
 | `sensor` Battery | Battery level |
-| `sensor` `<name> Location` | `latitude, longitude`, with `latitude`, `longitude`, `gps_accuracy`, `last_seen` (timestamp), `last_seen_local` (local time, readable), and `google_maps_url` attributes |
+| `sensor` `<name> Location` | `latitude, longitude`, with coordinates, accuracy, last-seen time, next scheduled update time/mode, and Maps URL attributes |
 | `sensor` `<name> Maps Link` | Google Maps URL (Diagnostic) |
 | `switch` `<name> Ring` | Optimistic ring toggle, turns itself off after 120 s |
 | `binary_sensor` `<name> Power Saving` | Read-only, with firmware, model, battery and connection state as attributes |
@@ -63,12 +63,12 @@ See the [changelog](CHANGELOG.md) for the details.
 
 | Entity | Notes |
 |---|---|
-| `device_tracker` | Location of the device |
+| `device_tracker` | Location of the device, with `last_seen_local`, `next_update_local`, and `next_update_mode` attributes |
 | `sensor` `<name> Location` / `Maps Link` | Same as for tags, plus `telephony_support`, `wifi_only`, `cdma`, `ring_supported`, `offline_find_supported` attributes as Samsung reports them, and `in_zone` / `polling_interval` (the schedule the device is on) |
 | `switch` `<name> Active Location` | Configuration entity. When on, every poll first asks the device for a fresh fix |
 | `button` `<name> Update Location` | Asks the device for a fresh fix right now, and updates only that device |
 | `switch` `<name> Ring` | Phones only (the website shows no ring for the other types) |
-| `binary_sensor` `<name> Location Retrieval Error` | Problem badge: on when Samsung's location request fails, the response contains no readable position, or an explicitly requested active location fails. The `error` attribute explains why. |
+| `binary_sensor` `<name> Location Retrieval Error` | Problem badge for retrieval errors; attributes include the explanation and a bounded history of sanitized Find My Mobile request/response summaries. |
 
 There is deliberately **no battery sensor** for these devices: Samsung only reports it when the
 device itself answers, so it was almost always stale.

@@ -1018,6 +1018,48 @@ LOCATION_OP_TYPES = ("LOCATION", "LASTLOC", "OFFLINE_LOC")
 # (device, kind-of-problem, shape) combinations already reported, so a persistent oddity in
 # Samsung's data is explained once in the log instead of on every poll.
 _REPORTED_SKIPS: set = set()
+MAX_FMM_REQUEST_HISTORY = 30
+
+
+def _record_fmm_request(
+    history: list | None,
+    endpoint: str,
+    *,
+    http_status: int | None = None,
+    result_code: str | int | None = None,
+    outcome: str | None = None,
+    details: dict | None = None,
+    response: dict | None = None,
+) -> None:
+    """Keep a short, coordinate- and credential-free summary of an FMM response."""
+    if history is None:
+        return
+    record = {
+        "time": datetime.now(pytz.UTC).isoformat(timespec="seconds"),
+        "endpoint": endpoint,
+        "http_status": http_status,
+        "result_code": result_code,
+        "outcome": outcome,
+    }
+    if details:
+        record.update(details)
+    if isinstance(response, dict):
+        if result_code is None:
+            record["result_code"] = response.get("resultCode")
+        operations = response.get("operation")
+        if isinstance(operations, list):
+            record["returned_operations"] = [
+                {
+                    key: op.get(key)
+                    for key in ("oprnType", "oprnStsCd", "oprnResultCode")
+                    if op.get(key) is not None
+                }
+                for op in operations
+                if isinstance(op, dict)
+            ][:10]
+            record["operation_count"] = len(operations)
+    history.append(record)
+    del history[:-MAX_FMM_REQUEST_HISTORY]
 
 
 def _to_float(value) -> float | None:
@@ -1206,6 +1248,7 @@ async def get_web_session_cookie(
     session: aiohttp.ClientSession,
     entry_id: str,
     force_refresh: bool = False,
+    request_history: list | None = None,
 ) -> tuple[str | None, str | None]:
     """Bootstrap (or reuse) a smartthingsfind.samsung.com web session (JSESSIONID + CSRF)
     from the master userauth_token captured at login.
@@ -1227,6 +1270,7 @@ async def get_web_session_cookie(
     cache_key = "_web_session_cache"
     cached = data_store.get(cache_key)
     if cached and not force_refresh:
+        _record_fmm_request(request_history, "web_session_cache", outcome="reused")
         return cached.get("jsessionid"), cached.get("csrf")
 
     user_auth_token = data_store.get(CONF_USER_AUTH_TOKEN)
@@ -1235,6 +1279,9 @@ async def get_web_session_cookie(
     device_id = data_store.get(CONF_DEVICE_ID) or _get_or_create_device_id(hass)
 
     if not user_auth_token or not auth_server_url:
+        _record_fmm_request(
+            request_history, "authorize", outcome="skipped", details={"reason": "missing_auth_data"}
+        )
         if not data_store.get("_warned_missing_web_token"):
             data_store["_warned_missing_web_token"] = True
             _LOGGER.warning(
@@ -1269,20 +1316,37 @@ async def get_web_session_cookie(
     try:
         async with session.get(f"{auth_server_url}/auth/oauth2/v2/authorize", params=params_auth) as res:
             if res.status != 200:
+                _record_fmm_request(request_history, "authorize", http_status=res.status, outcome="http_error")
                 _LOGGER.debug("[diag] Web session bridge: authorize HTTP %s", res.status)
                 return None, None
             auth_data = await res.json(content_type=None)
+        _record_fmm_request(
+            request_history,
+            "authorize",
+            http_status=res.status,
+            outcome="success" if auth_data.get("code") else "no_authorization_code",
+            details={"authorization_code_received": bool(auth_data.get("code"))},
+        )
 
         code = auth_data.get("code")
         if not code and auth_data.get("privacyAccepted") == "N" and "login_id" in params_auth:
             params_auth.pop("login_id", None)
             async with session.get(f"{auth_server_url}/auth/oauth2/v2/authorize", params=params_auth) as res:
                 if res.status != 200:
+                    _record_fmm_request(request_history, "authorize_retry", http_status=res.status, outcome="http_error")
                     _LOGGER.debug("[diag] Web session bridge: authorize retry HTTP %s", res.status)
                     return None, None
                 auth_data = await res.json(content_type=None)
+            _record_fmm_request(
+                request_history,
+                "authorize_retry",
+                http_status=res.status,
+                outcome="success" if auth_data.get("code") else "no_authorization_code",
+                details={"authorization_code_received": bool(auth_data.get("code"))},
+            )
             code = auth_data.get("code")
         if not code:
+            _record_fmm_request(request_history, "authorize", outcome="no_authorization_code")
             _LOGGER.debug("[diag] Web session bridge: authorize response missing code: %s", auth_data)
             return None, None
 
@@ -1293,10 +1357,18 @@ async def get_web_session_cookie(
             params={"payload": "hound"},
         ) as res:
             if res.status != 200:
+                _record_fmm_request(request_history, "getState.do", http_status=res.status, outcome="http_error")
                 _LOGGER.debug("[diag] Web session bridge: getState.do HTTP %s", res.status)
                 return None, None
             state_data = await res.json(content_type=None)
         login_state = state_data.get("state")
+        _record_fmm_request(
+            request_history,
+            "getState.do",
+            http_status=res.status,
+            outcome="success" if login_state else "missing_state",
+            details={"state_received": bool(login_state)},
+        )
         if not login_state:
             _LOGGER.debug("[diag] Web session bridge: getState.do missing state: %s", state_data)
             return None, None
@@ -1321,6 +1393,13 @@ async def get_web_session_cookie(
             # chain correctly.
             jar_cookies = web_client.cookie_jar.filter_cookies("https://smartthingsfind.samsung.com")
             jsessionid = jar_cookies["JSESSIONID"].value if "JSESSIONID" in jar_cookies else None
+        _record_fmm_request(
+            request_history,
+            "login.do",
+            http_status=login_status,
+            outcome="success" if jsessionid else "missing_session_cookie",
+            details={"session_cookie_received": bool(jsessionid)},
+        )
 
         if not jsessionid:
             _LOGGER.debug(
@@ -1333,6 +1412,13 @@ async def get_web_session_cookie(
             cookies={"JSESSIONID": jsessionid},
         ) as res:
             csrf = res.headers.get("_csrf") if res.status == 200 else None
+        _record_fmm_request(
+            request_history,
+            "chkLogin.do",
+            http_status=res.status,
+            outcome="success" if csrf else "missing_csrf",
+            details={"csrf_received": bool(csrf)},
+        )
         if not csrf:
             _LOGGER.debug("[diag] Web session bridge: chkLogin.do validation failed")
             return None, None
@@ -1662,6 +1748,7 @@ async def perform_fmm_operation(
     extra_payload: dict | None = None,
     poll_seconds: int = 20,
     poll_interval: int = 3,
+    request_history: list | None = None,
 ) -> tuple[bool, str | None]:
     """Trigger an operation (LOCATION, RING, ...) for a device (tag or FMM) via the
     legacy website API (dm/addOperation.do), then poll dm/getOperationResult.do until
@@ -1677,11 +1764,17 @@ async def perform_fmm_operation(
     web_dvce_id = dev_data.get("web_dvce_id")
     web_usr_id = dev_data.get("web_usr_id")
     if not web_dvce_id:
+        _record_fmm_request(
+            request_history, "addOperation.do", outcome="skipped", details={"reason": "missing_web_device_id"}
+        )
         _LOGGER.debug("[%s] %s requested but no website device id resolved", dev_name, operation)
         return False, None
 
-    jsessionid, csrf = await get_web_session_cookie(hass, session, entry_id)
+    jsessionid, csrf = await get_web_session_cookie(
+        hass, session, entry_id, request_history=request_history
+    )
     if not jsessionid or not csrf:
+        _record_fmm_request(request_history, "addOperation.do", outcome="skipped", details={"reason": "web_session_unavailable"})
         _LOGGER.debug("[%s] %s requested but web session is unavailable", dev_name, operation)
         return False, None
     web_client = await _get_web_client(hass, entry_id)
@@ -1699,10 +1792,25 @@ async def perform_fmm_operation(
             cookies={"JSESSIONID": jsessionid},
         ) as res:
             if res.status != 200:
+                _record_fmm_request(
+                    request_history,
+                    "addOperation.do",
+                    http_status=res.status,
+                    outcome="http_error",
+                    details={"operation": operation},
+                )
                 _LOGGER.debug("[%s] addOperation.do (%s) HTTP %s", dev_name, operation, res.status)
                 return False, None
             accepted_data = await res.json(content_type=None)
 
+        _record_fmm_request(
+            request_history,
+            "addOperation.do",
+            http_status=res.status,
+            result_code=accepted_data.get("resultCode"),
+            outcome="accepted" if accepted_data.get("resultCode") == "00" else "rejected",
+            details={"operation": operation, "request_id_received": bool(accepted_data.get("reqId"))},
+        )
         if accepted_data.get("resultCode") != "00":
             reason = accepted_data.get("resultCode")
             _LOGGER.debug("[%s] %s request rejected: resultCode=%s", dev_name, operation, reason)
@@ -1723,6 +1831,13 @@ async def perform_fmm_operation(
                 cookies={"JSESSIONID": jsessionid},
             ) as res:
                 if res.status != 200:
+                    _record_fmm_request(
+                        request_history,
+                        "getOperationResult.do",
+                        http_status=res.status,
+                        outcome="http_error",
+                        details={"operation": operation},
+                    )
                     continue
                 result_data = await res.json(content_type=None)
             candidates = [
@@ -1731,6 +1846,17 @@ async def perform_fmm_operation(
             ]
             if candidates:
                 latest = candidates[-1]
+                _record_fmm_request(
+                    request_history,
+                    "getOperationResult.do",
+                    http_status=res.status,
+                    result_code=latest.get("oprnResultCode"),
+                    outcome="completed" if latest.get("oprnStsCd") == "2800" else "pending",
+                    details={
+                        "operation": operation,
+                        "operation_status": latest.get("oprnStsCd"),
+                    },
+                )
                 if latest.get("oprnStsCd") == "2800":
                     success = latest.get("oprnResultCode") == "1200"
                     _LOGGER.debug(
@@ -1738,9 +1864,26 @@ async def perform_fmm_operation(
                         dev_name, operation, "succeeded" if success else "failed", latest.get("oprnResultCode"),
                     )
                     return success, (None if success else latest.get("oprnResultCode"))
+            else:
+                _record_fmm_request(
+                    request_history,
+                    "getOperationResult.do",
+                    http_status=res.status,
+                    outcome="no_matching_operation",
+                    details={"operation": operation},
+                )
         _LOGGER.debug("[%s] %s request timed out after %ss", dev_name, operation, poll_seconds)
+        _record_fmm_request(
+            request_history, "getOperationResult.do", outcome="timeout", details={"operation": operation}
+        )
         return False, None
     except Exception as e:
+        _record_fmm_request(
+            request_history,
+            "fmm_operation",
+            outcome="exception",
+            details={"exception_type": type(e).__name__, "operation": operation},
+        )
         _LOGGER.debug("[%s] %s request raised: %s", dev_name, operation, e, exc_info=True)
         return False, None
 
@@ -1786,6 +1929,7 @@ async def get_fmm_device_location(
     dev_id = dev_data.get('device_id')
     dev_name = dev_data.get('name') or dev_id or "SmartThings Find"
     web_dvce_id = dev_data.get("web_dvce_id")
+    request_history = dev_data.setdefault("_fmm_request_history", [])
 
     fail = {
         "dev_name": dev_name,
@@ -1794,12 +1938,16 @@ async def get_fmm_device_location(
         "location_found": False,
         "fetch_error": None,
         "position_error": None,
+        "fmm_request_history": request_history,
     }
 
     if not web_dvce_id:
         # Not an error - the name-matching enrichment step just hasn't resolved this
         # device yet (or the web bridge is unavailable this cycle).
         _LOGGER.debug("[%s] No website device id resolved yet, cannot fetch FMM location", dev_name)
+        _record_fmm_request(
+            request_history, "setLastSelect.do", outcome="skipped", details={"reason": "missing_web_device_id"}
+        )
         return {**fail, "update_success": True, "fetch_error": "Website device ID is not resolved"}
 
     active_location_error = None
@@ -1821,7 +1969,7 @@ async def get_fmm_device_location(
         # do its job first. A manual button press (force_active=True) always goes through
         # regardless, since that's an explicit one-off request from the user.
         active_success, active_reason = await perform_fmm_operation(
-            hass, session, entry_id, dev_data, "LOCATION"
+            hass, session, entry_id, dev_data, "LOCATION", request_history=request_history
         )
         active_location_error = None if active_success else (
             f"Samsung active location request failed (resultCode={active_reason})"
@@ -1840,8 +1988,20 @@ async def get_fmm_device_location(
     fail["active_location_error"] = active_location_error
 
     async def _fetch(force_refresh: bool):
-        jsessionid, csrf = await get_web_session_cookie(hass, session, entry_id, force_refresh=force_refresh)
+        jsessionid, csrf = await get_web_session_cookie(
+            hass,
+            session,
+            entry_id,
+            force_refresh=force_refresh,
+            request_history=request_history,
+        )
         if not jsessionid or not csrf:
+            _record_fmm_request(
+                request_history,
+                "setLastSelect.do",
+                outcome="skipped",
+                details={"reason": "web_session_unavailable", "force_refresh": force_refresh},
+            )
             return None, None
         web_client = await _get_web_client(hass, entry_id)
         async with web_client.post(
@@ -1856,6 +2016,14 @@ async def get_fmm_device_location(
                 body = await res.json(content_type=None)
             else:
                 body = None
+        _record_fmm_request(
+            request_history,
+            "setLastSelect.do",
+            http_status=status,
+            outcome="success" if status == 200 and isinstance(body, dict) else "http_error",
+            details={"force_refresh": force_refresh},
+            response=body if isinstance(body, dict) else None,
+        )
         return status, body
 
     try:
@@ -1969,6 +2137,7 @@ async def get_fmm_device_location(
             "fetch_error": None,
             "position_error": position_error,
             "active_location_error": active_location_error,
+            "fmm_request_history": list(request_history),
             "location_found": bool(
                 used_loc and used_loc.get("latitude") is not None and used_loc.get("longitude") is not None
             ),
