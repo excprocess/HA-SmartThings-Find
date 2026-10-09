@@ -35,6 +35,7 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+FMM_LOCATION_POLL_SECONDS = 60
 
 URL_ENTRY_POINT = 'https://account.samsung.com/accounts/ANDROIDSDK/getEntryPoint'
 SMARTTHINGS_APP_VERSION = "1.8.21.28"
@@ -1969,7 +1970,13 @@ async def get_fmm_device_location(
         # do its job first. A manual button press (force_active=True) always goes through
         # regardless, since that's an explicit one-off request from the user.
         active_success, active_reason = await perform_fmm_operation(
-            hass, session, entry_id, dev_data, "LOCATION", request_history=request_history
+            hass,
+            session,
+            entry_id,
+            dev_data,
+            "LOCATION",
+            poll_seconds=FMM_LOCATION_POLL_SECONDS,
+            request_history=request_history,
         )
         active_location_error = None if active_success else (
             f"Samsung active location request failed (resultCode={active_reason})"

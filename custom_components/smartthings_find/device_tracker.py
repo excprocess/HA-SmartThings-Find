@@ -122,6 +122,9 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity):
         """
         tag_data = self.coordinator.data.get(self.device_id, {}) or {}
         redundant = {
+            "friendly_name",
+            "dev_name",
+            "icon_url",
             "is_tracker",
             "is_fmm",
             "original_name",
@@ -184,7 +187,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity):
             else None
         )
         attrs["next_update_local"] = (
-            next_update_local.strftime("%Y-%m-%d %H:%M:%S %Z %z")
+            next_update_local.isoformat(timespec="seconds")
             if next_update_local
             else None
         )

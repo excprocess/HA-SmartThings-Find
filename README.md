@@ -22,6 +22,7 @@ See [Credits](#credits) for everything this fork builds on.
 
 ## What's new in 8.1
 
+- **8.1.4:** Active Find My Mobile location requests wait up to 60 seconds for Samsung to complete them. The `next_update_local` tracker attribute is now an ISO 8601 timestamp suitable for Home Assistant templates. Redundant `dev_name` and `icon_url` tracker attributes are omitted.
 - **Separate polling interval for devices inside a zone** (see [Update intervals](#update-intervals)).
 - **Fix:** a watch, PC or earbuds could turn *Unavailable* and stop showing new positions when Samsung
   reported one for them (typically a position seen by nearby devices on the Find network). Details in the

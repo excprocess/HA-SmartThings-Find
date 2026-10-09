@@ -1,5 +1,13 @@
 # Changelog
 
+## 8.1.4
+
+### Changed
+- Find My Mobile active `LOCATION` requests now poll for up to 60 seconds before timing out; other operations keep their existing timeout.
+- `next_update_local` now uses an ISO 8601 timestamp with the Home Assistant local UTC offset, so templates can parse it as a date/time.
+- Removed `dev_name` and `icon_url` from device-tracker attributes; the icon URL remains used internally as the entity picture.
+- Excluded the device-provided `friendly_name` duplicate. Home Assistant still adds its standard `friendly_name` state attribute automatically.
+
 ## 8.1.3
 
 ### Fixed
