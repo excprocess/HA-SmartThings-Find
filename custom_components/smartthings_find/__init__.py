@@ -278,7 +278,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                     dev_data['_consecutive_fetch_failures'] = failures
                     prev_tag_data = previous.get(dev_data['device_id'])
                     failed_tag_data = tag_data
-        failed_tag_data['next_update_at'] = datetime.now(timezone.utc) + timedelta(
+            failed_tag_data['next_update_at'] = datetime.now(timezone.utc) + timedelta(
                         seconds=min(self.away_interval, self.in_zone_interval)
                     )
                     failed_tag_data['next_update_mode'] = 'passive'
