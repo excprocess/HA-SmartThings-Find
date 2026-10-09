@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import time
 import aiohttp
@@ -9,7 +9,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -214,7 +213,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         dev_data['_poll_interval_s'] = interval
         dev_data['_next_poll'] = now + interval
         seconds_until_next_poll = max(0, dev_data['_next_poll'] - time.monotonic())
-        tag_data['next_update_at'] = dt_util.utcnow() + timedelta(
+        tag_data['next_update_at'] = datetime.now(timezone.utc) + timedelta(
             seconds=seconds_until_next_poll
         )
         tag_data['next_update_mode'] = (
@@ -279,7 +278,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                     dev_data['_consecutive_fetch_failures'] = failures
                     prev_tag_data = previous.get(dev_data['device_id'])
                     failed_tag_data = tag_data
-                    failed_tag_data['next_update_at'] = dt_util.utcnow() + timedelta(
+        failed_tag_data['next_update_at'] = datetime.now(timezone.utc) + timedelta(
                         seconds=min(self.away_interval, self.in_zone_interval)
                     )
                     failed_tag_data['next_update_mode'] = 'passive'
