@@ -20,6 +20,13 @@ This project is a fork in a long chain: [Vedeneb/HA-SmartThings-Find](https://gi
 login rework from [PixelShober/HA-SmartThings-Find](https://github.com/PixelShober/HA-SmartThings-Find).
 See [Credits](#credits) for everything this fork builds on.
 
+## What's new in 8.1
+
+- **Separate polling interval for devices inside a zone** (see [Update intervals](#update-intervals)).
+- **Fix:** a watch, PC or earbuds could turn *Unavailable* and stop showing new positions when Samsung
+  reported one for them (typically a position seen by nearby devices on the Find network). Details in the
+  [changelog](CHANGELOG.md).
+
 ## What's new in 8.0
 
 Previous versions could only *locate SmartTags*: phones, watches, earbuds and PCs showed up
@@ -57,11 +64,11 @@ See the [changelog](CHANGELOG.md) for the details.
 | Entity | Notes |
 |---|---|
 | `device_tracker` | Location of the device |
-| `sensor` `<name> Location` / `Maps Link` | Same as for tags, plus `telephony_support`, `wifi_only`, `cdma`, `ring_supported`, `offline_find_supported` attributes as Samsung reports them |
+| `sensor` `<name> Location` / `Maps Link` | Same as for tags, plus `telephony_support`, `wifi_only`, `cdma`, `ring_supported`, `offline_find_supported` attributes as Samsung reports them, and `in_zone` / `polling_interval` (the schedule the device is on) |
 | `switch` `<name> Active Location` | Configuration entity. When on, every poll first asks the device for a fresh fix |
 | `button` `<name> Update Location` | Asks the device for a fresh fix right now, and updates only that device |
 | `switch` `<name> Ring` | Phones only (the website shows no ring for the other types) |
-| `binary_sensor` `<name> Stale Position` | Problem badge: on when the device can't be actively located at all, or its position is over 3 poll cycles old |
+| `binary_sensor` `<name> Stale Position` | Problem badge: on when the device can't be actively located at all, or its position is over 3 of its own polling intervals old (never under 30 minutes) |
 
 There is deliberately **no battery sensor** for these devices: Samsung only reports it when the
 device itself answers, so it was almost always stale.
@@ -93,6 +100,13 @@ Read this before opening an issue, most of it comes from how Samsung's service b
   rather than assuming the shown position is current - it's on whenever the position either can't be
   refreshed at all or hasn't updated in a while, so an old fix is never mistaken for a fresh one.
 - **Ring only works for phones**, and only if the phone can be reached.
+- **Positions reported by nearby devices.** A watch, PC or earbuds that nobody asks can still get a new
+  position when another Galaxy device passes close to it. It shows up here when Samsung returns it in
+  the clear. If Samsung returns it end-to-end encrypted it can't be read (the same limit as
+  [samsung-re-find](https://github.com/charlesbel/samsung-re-find)): the device then stays available with
+  its last known position, flagged by *Stale Position*, and the log says so once. If an entry is skipped for
+  any other reason, the log shows its shape (never its coordinates) once per device: look for
+  `Skipped a ... entry from Samsung`, that line is what makes a bug report actionable.
 
 ## Notes on authentication
 
@@ -201,7 +215,24 @@ update. Your config entry keeps working, see [authentication](#notes-on-authenti
    - **Paste**: paste the copied URL back into the Home Assistant dialog.
 4. The integration checks the token and loads your devices.
 
-The only option is the **update interval** (120 seconds by default; raise it if you use Active Location on several devices).
+### Update intervals
+
+There are two options, in the integration's *Configure* dialog:
+
+| Option | Default | Applies to |
+|---|---|---|
+| **Update interval** | 120 s | every device that is **not** inside a zone (and every device, if the next option is 0) |
+| **Update interval inside a zone** | 0 | devices inside a Home Assistant zone (Home, a workplace, ...). `0` = no separate interval |
+
+Each device is on its own schedule, decided from where it was at its last poll, using the same test the
+device tracker uses for its `home` / zone state. A device at home can be checked every 30 minutes while
+one that has left is checked every 2: set *inside a zone* to 1800 and leave the general interval at 120.
+It also works the other way round if you'd rather watch a device closely while it is somewhere in
+particular. Devices that aren't due yet are not requested at all, so a longer in-zone interval also means
+fewer requests to Samsung, and an Active Location device sitting at home is no longer woken at the short
+interval. A failed poll is retried on the next tick, not after the long interval. The minimum for either
+is 30 seconds, and the integration ticks at the shorter of the two. Raise the intervals if you use Active
+Location on several devices.
 
 ## Debugging
 

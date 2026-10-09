@@ -1,4 +1,5 @@
 import logging
+import time
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -69,6 +70,9 @@ class UpdateLocationButton(ButtonEntity):
 
         if tag_data.get('update_success'):
             self.device['_consecutive_fetch_failures'] = 0
+            # A manual refresh counts as this device's poll: its next scheduled one starts
+            # from now, on whichever interval (in zone / elsewhere) its new position gives.
+            self.coordinator.schedule_device(self.device, tag_data, time.monotonic())
         else:
             # Same bounded fallback as the coordinator's normal cycle (see __init__.py):
             # bridge over a short run of failures with the last known good position

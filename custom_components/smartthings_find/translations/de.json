@@ -28,9 +28,10 @@
   "options": {
     "step": {
       "init": {
-        "description": "Abfrageoptionen konfigurieren. Aktive Standortabfragen werden jetzt pro Gerät über den Schalter \"Active Location\" eingestellt.",
+        "description": "Jedes Gerät wird nach seinem eigenen Zeitplan abgefragt. Geräte innerhalb einer Home-Assistant-Zone (z. B. Zuhause) nutzen das Intervall für Zonen, alle anderen das allgemeine. Aktive Standortabfragen werden pro Gerät über den Schalter \"Active Location\" eingestellt.",
         "data": {
-          "update_interval": "Aktualisierungsintervall (in Sekunden)"
+          "update_interval": "Aktualisierungsintervall (Sekunden), für Geräte außerhalb jeder Zone",
+          "update_interval_in_zone": "Aktualisierungsintervall innerhalb einer Zone (Sekunden, 0 = wie das allgemeine)"
         }
       }
     }

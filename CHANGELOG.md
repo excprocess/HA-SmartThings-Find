@@ -1,5 +1,43 @@
 # Changelog
 
+## 8.1.0
+
+### Added
+- **Different polling interval for devices inside a Home Assistant zone.** A device that is in a zone
+  (Home, a workplace, ...) is polled on its own, usually much longer, interval, while every other device
+  keeps the general one. New option **Update interval inside a zone**; `0` (the default) means no separate
+  interval, so nothing changes unless you set it. Each device is scheduled on its own, so one at home and
+  one away don't share a clock: devices that aren't due yet are not fetched at all, and Active Location
+  requests follow the same schedule (a phone sitting at home is no longer woken every few minutes). A
+  failed poll is retried on the next tick instead of waiting out a long in-zone interval, and the *Update
+  Location* button restarts that device's schedule.
+- `in_zone` and `polling_interval` attributes on the location sensor, to see which schedule a device is on.
+- A `tests/` folder (run on every push by a new workflow): the parser, the per-device scheduling and the
+  Find My Mobile read are tested against canned Samsung answers, with Home Assistant stubbed out.
+
+### Fixed
+- **A passive device (watch, PC, earbuds) could turn Unavailable, and stop showing new positions, when
+  Samsung reported a new position for it.** The code that reads Samsung's list of positions assumed every
+  entry is complete; one that wasn't (typically a position reported by nearby devices on the Find
+  network, which can come without a vertical accuracy, with empty coordinates or with an unusual date)
+  raised an error, the whole read was then counted as failed, and after three polls the device went
+  Unavailable. Such an entry is now skipped, never marks the read as failed, and never replaces a valid
+  position with an empty one; an entry whose only problem is a missing timestamp now uses the time Samsung
+  recorded it instead of being dropped. What Samsung sends is only logged, once per device and shape, in
+  a form that contains no coordinates (look for `Skipped a ... entry from Samsung`).
+- When an answer holds no usable position at all, the last known one keeps being shown (and flagged by
+  *Stale Position*) instead of the entity going blank.
+- *Stale Position* judged "old" against the default interval rather than the one you configured; it now
+  uses three polls of that device's own interval (never less than 30 minutes).
+- The accuracy of a position no longer fails when only one of the two uncertainties is reported; this also
+  applied to SmartTags.
+
+### Notes
+- If a device's positions never update even though the Samsung app shows new ones, Samsung may be
+  returning them end-to-end encrypted, which can't be read here (the same limit as
+  [samsung-re-find](https://github.com/charlesbel/samsung-re-find)). The log now says so, once, and the
+  device stays available with its last known position.
+
 ## 8.0.0
 
 ### Added

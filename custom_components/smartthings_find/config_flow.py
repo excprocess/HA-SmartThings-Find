@@ -18,6 +18,9 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_UPDATE_INTERVAL,
     CONF_UPDATE_INTERVAL_DEFAULT,
+    CONF_UPDATE_INTERVAL_IN_ZONE,
+    CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT,
+    MIN_UPDATE_INTERVAL,
     CONF_USER_AUTH_TOKEN,
     CONF_LOGIN_ID
 )
@@ -151,6 +154,12 @@ class SmartThingsFindConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return SmartThingsFindOptionsFlowHandler(config_entry)
     
     
+def _interval_or_off(value: int) -> int:
+    """0 means "no separate interval"; anything else is held to the same minimum as the
+    general interval, so a typo can't hammer Samsung's servers."""
+    return 0 if value <= 0 else max(value, MIN_UPDATE_INTERVAL)
+
+
 class SmartThingsFindOptionsFlowHandler(OptionsFlowWithConfigEntry):
     """Handle an options flow."""
 
@@ -160,7 +169,14 @@ class SmartThingsFindOptionsFlowHandler(OptionsFlowWithConfigEntry):
         """Handle options flow."""
 
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            options = dict(user_input)
+            options[CONF_UPDATE_INTERVAL_IN_ZONE] = _interval_or_off(
+                options.get(
+                    CONF_UPDATE_INTERVAL_IN_ZONE,
+                    CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT,
+                )
+            )
+            return self.async_create_entry(title="", data=options)
 
         data_schema = vol.Schema(
             {
@@ -169,7 +185,13 @@ class SmartThingsFindOptionsFlowHandler(OptionsFlowWithConfigEntry):
                     default=self.options.get(
                         CONF_UPDATE_INTERVAL, CONF_UPDATE_INTERVAL_DEFAULT
                     ),
-                ): vol.All(vol.Coerce(int), vol.Clamp(min=30)),
+                ): vol.All(vol.Coerce(int), vol.Clamp(min=MIN_UPDATE_INTERVAL)),
+                vol.Optional(
+                    CONF_UPDATE_INTERVAL_IN_ZONE,
+                    default=self.options.get(
+                        CONF_UPDATE_INTERVAL_IN_ZONE, CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Clamp(min=0)),
                 # Active-mode is now a per-device "Active Location" switch (only on FMM
                 # devices - phone/tablet/watch/buds - where it actually has an effect;
                 # SmartTags always reject it, resultCode=01) instead of a single global

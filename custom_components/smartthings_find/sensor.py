@@ -154,6 +154,11 @@ class DeviceLocationSensor(SensorEntity):
             attrs['active_location_supported'] = tag_data.get('active_location_supported')
         if 'position_stale' in tag_data:
             attrs['position_stale'] = tag_data.get('position_stale')
+        # Which schedule this device is on: inside a Home Assistant zone it is polled on the
+        # in-zone interval, anywhere else on the general one (see the integration options).
+        if 'polling_interval' in tag_data:
+            attrs['in_zone'] = tag_data.get('in_zone')
+            attrs['polling_interval'] = tag_data.get('polling_interval')
         return attrs
 
 

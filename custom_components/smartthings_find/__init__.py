@@ -1,5 +1,6 @@
 from datetime import timedelta
 import logging
+import time
 import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.typing import ConfigType
@@ -24,9 +25,12 @@ from .const import (
     CONF_INSTALLED_APP_ID,
     CONF_UPDATE_INTERVAL,
     CONF_UPDATE_INTERVAL_DEFAULT,
+    CONF_UPDATE_INTERVAL_IN_ZONE,
+    CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT,
     MAX_STALE_FALLBACK_CYCLES,
 )
 from .utils import (
+    is_in_active_zone,
     get_devices,
     get_device_location,
     update_device_maps_link,
@@ -97,7 +101,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # fetch data from STF and update the device_tracker and sensor
     # entities
     update_interval = entry.options.get(CONF_UPDATE_INTERVAL, CONF_UPDATE_INTERVAL_DEFAULT)
-    coordinator = SmartThingsFindCoordinator(hass, session, devices, update_interval, entry.entry_id)
+    # 0 (the default) = no separate in-zone interval: everything uses the general one.
+    in_zone_interval = entry.options.get(
+        CONF_UPDATE_INTERVAL_IN_ZONE, CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT) or update_interval
+    coordinator = SmartThingsFindCoordinator(
+        hass, session, devices, update_interval, in_zone_interval, entry.entry_id)
 
     # This is what makes the whole integration slow to load (around 10-15
     # seconds for my 15 devices) but it is the right way to do it. Only if
@@ -154,8 +162,21 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+# A device whose next poll falls within this many seconds of the current tick is polled now,
+# so ticks that arrive a moment early don't push it a whole tick later.
+DUE_SLACK_SECONDS = 2
+
+
 class SmartThingsFindCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching SmartThings Find data."""
+    """Class to manage fetching SmartThings Find data.
+
+    Every device has its own schedule. A device inside one of Home Assistant's zones (Home,
+    a workplace, ...) is polled every ``in_zone_interval`` seconds, any other device every
+    ``update_interval`` seconds - typically the other way round from how much you care: a
+    device that is somewhere it is expected to be needs checking far less often than one
+    that has left. The coordinator itself ticks at the shorter of the two, and on each tick
+    only the devices that are due are fetched; the rest keep their last data untouched.
+    """
 
     def __init__(
         self,
@@ -163,6 +184,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         session: aiohttp.ClientSession,
         devices,
         update_interval: int,
+        in_zone_interval: int,
         entry_id: str
     ):
         """Initialize the coordinator."""
@@ -170,27 +192,66 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         self.devices = devices
         self.hass = hass
         self.entry_id = entry_id
+        self.away_interval = update_interval
+        self.in_zone_interval = in_zone_interval or update_interval
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=update_interval)  # Update interval for all entities
+            update_interval=timedelta(seconds=min(self.away_interval, self.in_zone_interval))
         )
+
+    def schedule_device(self, dev_data: dict, tag_data: dict, now: float) -> None:
+        """Work out when a device is due next, from where it is now.
+
+        ``now`` is a time.monotonic() reading; a fetch that failed must not call this (it
+        should be retried on the next tick instead, see _async_update_data).
+        """
+        in_zone = bool(tag_data.get('location_found')) and is_in_active_zone(
+            self.hass, tag_data.get('used_loc'))
+        interval = self.in_zone_interval if in_zone else self.away_interval
+        dev_data['_poll_interval_s'] = interval
+        dev_data['_next_poll'] = now + interval
+        # Shown on the location sensor, so you can see which schedule a device is on.
+        tag_data['in_zone'] = in_zone
+        tag_data['polling_interval'] = interval
+
+    @staticmethod
+    def _is_due(dev_data: dict, previous: dict, now: float) -> bool:
+        if dev_data['device_id'] not in previous:
+            return True
+        next_poll = dev_data.get('_next_poll')
+        return next_poll is None or now + DUE_SLACK_SECONDS >= next_poll
 
     async def _async_update_data(self):
         """Fetch data from SmartThings Find."""
         try:
             tags = {}
             previous = self.data or {}
+            # Measured at the start of the cycle (not after each fetch) so a long cycle
+            # doesn't make a device skip the tick it was meant to be polled on.
+            now = time.monotonic()
             _LOGGER.debug("Updating locations...")
             for device in self.devices:
                 dev_data = device['data']
+                dev_name = dev_data.get('name') or dev_data['device_id']
+                if not self._is_due(dev_data, previous, now):
+                    tags[dev_data['device_id']] = previous[dev_data['device_id']]
+                    _LOGGER.debug(
+                        "[%s] Not due for another %ss", dev_name,
+                        round(dev_data.get('_next_poll', now) - now))
+                    continue
                 tag_data = await get_device_location(self.hass, self.session, dev_data, self.entry_id)
-                if tag_data.get('update_success'):
+                fetch_ok = bool(tag_data.get('update_success'))
+                if fetch_ok:
                     dev_data['_consecutive_fetch_failures'] = 0
+                    self.schedule_device(dev_data, tag_data, now)
                 else:
                     # This cycle's fetch failed outright (session hiccup, transient HTTP
                     # error, ...) rather than just "no fresher position available yet".
+                    # Retry on the very next tick, whatever interval the device is on: a
+                    # failure must not wait out a long in-zone interval.
+                    dev_data['_next_poll'] = 0
                     # Bridge over a SHORT run of these with the last known good position,
                     # so a one-off blip doesn't make the entity flash Unavailable - but
                     # only for a bounded number of consecutive cycles, and every cycle
@@ -210,14 +271,14 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                     ):
                         _LOGGER.debug(
                             "[%s] Fetch failed this cycle (%s/%s) - keeping last known position",
-                            dev_data.get('name') or dev_data['device_id'], failures, MAX_STALE_FALLBACK_CYCLES,
+                            dev_name, failures, MAX_STALE_FALLBACK_CYCLES,
                         )
                         tag_data = prev_tag_data
                     elif failures > MAX_STALE_FALLBACK_CYCLES:
                         _LOGGER.warning(
                             "[%s] Fetch has failed %s cycles in a row - showing as unavailable "
                             "instead of continuing to mask it with a stale position",
-                            dev_data.get('name') or dev_data['device_id'], failures,
+                            dev_name, failures,
                         )
                 tags[dev_data['device_id']] = tag_data
                 if tag_data.get('location_found'):
@@ -232,9 +293,9 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                         self.entry_id,
                         dev_data.get('st_device_id') or dev_data['device_id'],
                     )
-            _LOGGER.debug(f"Fetched {len(tags)} locations")
+            _LOGGER.debug("Fetched %s locations", len(tags))
             return tags
-        except ConfigEntryAuthFailed as err:
+        except ConfigEntryAuthFailed:
             raise
         except Exception as err:
             raise UpdateFailed(f"Error fetching data: {err}")

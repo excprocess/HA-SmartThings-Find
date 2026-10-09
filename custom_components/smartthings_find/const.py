@@ -11,8 +11,14 @@ CONF_DEVICE_ID = "device_id"
 CONF_ST_USER_UUID = "st_user_uuid"
 CONF_INSTALLED_APP_ID = "installed_app_id"
 
+# Polling interval, in seconds. CONF_UPDATE_INTERVAL is the general one: it applies to every
+# device that is not inside a Home Assistant zone. CONF_UPDATE_INTERVAL_IN_ZONE overrides it for
+# devices that are inside one (0 = no override, same interval as everywhere else).
 CONF_UPDATE_INTERVAL = "update_interval"
 CONF_UPDATE_INTERVAL_DEFAULT = 120
+CONF_UPDATE_INTERVAL_IN_ZONE = "update_interval_in_zone"
+CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT = 0
+MIN_UPDATE_INTERVAL = 30
 
 RING_TIMEOUT_SECONDS = 120
 

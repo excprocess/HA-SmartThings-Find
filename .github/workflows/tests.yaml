@@ -1,0 +1,23 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install what the tests need (Home Assistant itself is stubbed out)
+        run: pip install aiohttp cryptography pytz
+      - name: Run the tests
+        run: |
+          for t in tests/test_*.py; do
+            echo "== $t"
+            python3 "$t" || exit 1
+          done

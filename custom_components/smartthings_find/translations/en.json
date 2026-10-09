@@ -28,9 +28,10 @@
   "options": {
     "step": {
       "init": {
-        "description": "Configure polling options. Active location requests are now set per device, with the \"Active Location\" switch on each phone/watch/etc.",
+        "description": "Each device is polled on its own schedule. Devices inside a Home Assistant zone (e.g. Home) use the in-zone interval, every other device uses the general one. Active location requests are set per device, with the \"Active Location\" switch on each phone/watch/etc.",
         "data": {
-          "update_interval": "Update interval (seconds)"
+          "update_interval": "Update interval (seconds), used for devices outside any zone",
+          "update_interval_in_zone": "Update interval inside a zone (seconds, 0 = same as the general one)"
         }
       }
     }

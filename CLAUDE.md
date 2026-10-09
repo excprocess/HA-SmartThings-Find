@@ -11,8 +11,8 @@ This repo is a fork of `Rain92/HA-SmartThings-Find`, itself the continuation of 
 redesigned their account login page and broke it) → here. Version 8.0.0 of this fork added Find My
 Mobile device support (phones/tablets/watches/earbuds/PCs) via a second, separate bridge to
 `smartthingsfind.samsung.com` documented under "Find My Mobile bridge" below - see `CHANGELOG.md` for
-the full list. There is no CI beyond HACS structural validation — no test suite, linter, or build step
-exists in this repo.
+the full list. CI is the HACS structural validation plus a small test suite (see "Commands"); there is
+no linter or build step.
 
 ## What this is
 
@@ -24,9 +24,16 @@ changes their backend.
 
 ## Commands
 
-There is no build, lint, or test tooling in this repo. The only automated check is
-`.github/workflows/validate.yaml`, which runs the `hacs/action` structural validator against the
-`custom_components/smartthings_find` integration on push/PR. Development is verified manually by
+There is no build or lint step. Two automated checks run on push/PR:
+`.github/workflows/validate.yaml` (the `hacs/action` structural validator) and
+`.github/workflows/tests.yaml`, which runs `tests/test_*.py`. Those tests import the integration with
+Home Assistant replaced by minimal stand-ins (`tests/_ha_stubs.py`), so they need only
+`pip install aiohttp cryptography pytz`; run them with `for t in tests/test_*.py; do python3 "$t" || exit 1; done`.
+They cover what is pure logic and where regressions were costly: `extract_best_location` against the
+shapes Samsung returns (`test_parser.py`), the per-device polling schedule with a fake clock
+(`test_scheduling.py`), and `get_fmm_device_location` against canned answers (`test_fmm_read.py`). When
+Samsung sends something unexpected, add the shape as a case there. Everything that touches Home
+Assistant or Samsung's real servers is still verified manually by
 installing the integration into a real Home Assistant instance (via HACS custom repo or by copying
 `custom_components/smartthings_find` into HA's `config/custom_components/`) and exercising the config
 flow / entities live. Enable debug logs via HA's `configuration.yaml`:
@@ -180,6 +187,33 @@ All logic lives in `custom_components/smartthings_find/`:
   `CONF_UPDATE_INTERVAL_DEFAULT = 120`, `RING_TIMEOUT_SECONDS = 120`), and the `BATTERY_LEVELS`
   mapping (STF reports coarse battery buckets like `FULL`/`MEDIUM`/`LOW`/`VERY_LOW` rather than a
   percentage; `sensor.py` maps these to numeric values).
+
+### Invariants worth keeping (each one was a real bug)
+
+- **Reading Samsung's list of positions must never raise, and an unusable entry must never win.**
+  `extract_best_location` (used for every Find My Mobile read) skips an entry it can't use - no readable
+  coordinates, an unparseable date, an `encLocation` that is an opaque string or is encrypted - instead of
+  raising or letting it replace a valid older position. The previous version used bare `float()` /
+  `strptime()` on whatever arrived, so one position reported by nearby devices on the Find network (which
+  can lack the vertical accuracy, carry empty coordinates, or have its date elsewhere) made the whole read
+  raise; `get_fmm_device_location` treated that as a failed read, and after
+  `MAX_STALE_FALLBACK_CYCLES` the device went Unavailable. `update_success` means "we reached Samsung and
+  got an answer", never "the answer was tidy": parsing trouble degrades to "keep the last known position"
+  (`dev_data['_last_good_loc']`), flagged by `position_stale`. Skipped entries are described in the log
+  once per device and shape by `_report_skip_once`, with key names and date strings but never coordinates.
+- **Polling is per device, not per coordinator.** `SmartThingsFindCoordinator` ticks at
+  `min(update_interval, update_interval_in_zone)`; each device carries `_next_poll` (a `time.monotonic()`
+  deadline) and is only fetched when due, otherwise its previous data object is reused untouched. The
+  interval a device gets comes from `is_in_active_zone`, which is the same call
+  `homeassistant.components.zone.async_active_zone(hass, lat, lon, accuracy)` the device tracker's own
+  state uses, so "in a zone" means exactly "the tracker says home / a zone name". `_next_poll` is
+  measured from the start of the cycle, not after each fetch, or a long cycle would make a device miss the
+  tick it was meant for. A failed fetch sets `_next_poll = 0` so it is retried on the next tick rather than
+  after a long in-zone interval; and scheduling is keyed off whether the *fetch* worked, not off the data
+  finally stored, because a masked failure stores the previous (successful) data. `in_zone_interval = 0`
+  (the default) means "same as the general interval", which keeps the behaviour from before 8.1 for anyone
+  who doesn't opt in. `dev_data['_poll_interval_s']` is what `position_stale` uses (three polls of the
+  device's own interval, at least 30 minutes).
 
 ## Key behavioral notes
 

@@ -31,7 +31,7 @@ from .const import (
     CONF_IOT_ACCESS_TOKEN, CONF_IOT_REFRESH_TOKEN, CONF_DEVICE_ID,
     CONF_INSTALLED_APP_ID, CONF_ST_USER_UUID,
     WEB_FIND_CLIENT_ID, WEB_FIND_SCOPE, CONF_USER_AUTH_TOKEN, CONF_LOGIN_ID,
-    CONF_UPDATE_INTERVAL, CONF_UPDATE_INTERVAL_DEFAULT,
+    CONF_UPDATE_INTERVAL_DEFAULT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1013,78 +1013,157 @@ async def authenticated_request(hass: HomeAssistant, session: aiohttp.ClientSess
     return status, text
 
 
-def extract_best_location(operations: list, dev_name: str) -> tuple[dict, dict]:
-    """
-    Extracts the best/newest location from the list of operations.
-    Returns (used_op, used_loc).
-    """
-    used_op = None
-    used_loc = {
-        "latitude": None,
-        "longitude": None,
-        "gps_accuracy": None,
-        "gps_date": None
-    }
-    
-    for op in operations:
-        if op['oprnType'] not in ['LOCATION', 'LASTLOC', 'OFFLINE_LOC']:
-            continue
-            
-        op_data = None
-        utc_date = None
-        
-        # Check standard location
-        if 'latitude' in op:
-            if 'extra' in op and 'gpsUtcDt' in op['extra']:
-                utc_date = parse_stf_date(op['extra']['gpsUtcDt'])
-            else:
-                 _LOGGER.warning(f"[{dev_name}] No UTC date in operation {op['oprnType']}")
-                 continue
-            op_data = op
+LOCATION_OP_TYPES = ("LOCATION", "LASTLOC", "OFFLINE_LOC")
 
-        # Check encrypted/nested location
-        elif 'encLocation' in op:
-            loc = op['encLocation']
-            if loc.get('encrypted'):
-                _LOGGER.debug(f"[{dev_name}] Ignoring encrypted location")
+# (device, kind-of-problem, shape) combinations already reported, so a persistent oddity in
+# Samsung's data is explained once in the log instead of on every poll.
+_REPORTED_SKIPS: set = set()
+
+
+def _to_float(value) -> float | None:
+    """float(value), or None for None / "" / anything that isn't a number. Never raises."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_stf_date_safe(value) -> datetime | None:
+    """Like parse_stf_date, but returns None for a missing or unrecognised value instead
+    of raising. Also accepts ISO 8601, in case Samsung uses it on some entry types."""
+    if value is None or value == "":
+        return None
+    text = str(value)
+    try:
+        return parse_stf_date(text)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=pytz.UTC)
+
+
+def _describe_value(value) -> str:
+    if value is None:
+        return "None"
+    if isinstance(value, str):
+        return "str" if value else "empty-str"
+    if isinstance(value, dict):
+        return "{" + ",".join(sorted(str(k) for k in value)) + "}"
+    if isinstance(value, (list, tuple)):
+        return f"list[{len(value)}]"
+    return type(value).__name__
+
+
+def _summarize_op(op: dict) -> str:
+    """Coordinate-free description of an operation entry (which keys it has, what type each
+    value is, and the date strings), so an unexpected shape can be diagnosed from a log
+    without the log containing anyone's position."""
+    shape = {k: _describe_value(v) for k, v in op.items()}
+    dates = {k: op[k] for k in ("oprnCrtDate", "oprnDoneDate") if op.get(k)}
+    extra = op.get("extra")
+    if isinstance(extra, dict) and extra.get("gpsUtcDt"):
+        dates["extra.gpsUtcDt"] = extra["gpsUtcDt"]
+    return f"keys={shape} dates={dates}"
+
+
+def _report_skip_once(dev_name: str, op: dict, reason: str, level: int = logging.WARNING) -> None:
+    signature = (dev_name, op.get("oprnType"), reason, tuple(sorted(op)))
+    if signature in _REPORTED_SKIPS:
+        _LOGGER.debug("[%s] Skipped %s entry: %s", dev_name, op.get("oprnType"), reason)
+        return
+    _REPORTED_SKIPS.add(signature)
+    _LOGGER.log(
+        level,
+        "[%s] Skipped a %s entry from Samsung (%s). Reported once per device and shape. %s",
+        dev_name, op.get("oprnType"), reason, _summarize_op(op),
+    )
+
+
+def extract_best_location(operations: list, dev_name: str) -> tuple[dict | None, dict | None]:
+    """
+    Extracts the newest usable location from the list of operations.
+    Returns (used_op, used_loc), or (None, None) when there is none.
+
+    Never raises, and never lets an unusable entry win: an entry with no readable coordinates
+    is skipped (it can't replace a valid older position with an empty one), and so is one whose
+    values don't parse. This is what keeps one odd entry - e.g. a position reported by nearby
+    devices on the Find network - from turning a device Unavailable or wiping its position.
+    """
+    best_op = None
+    best_loc = None
+    saw_encrypted = False
+
+    for op in operations or []:
+        if not isinstance(op, dict):
+            continue
+        op_type = op.get("oprnType")
+        if op_type not in LOCATION_OP_TYPES:
+            continue
+
+        source = op
+        if op.get("latitude") is None:
+            nested = op.get("encLocation")
+            if isinstance(nested, dict):
+                if nested.get("encrypted"):
+                    saw_encrypted = True
+                    _LOGGER.debug("[%s] Ignoring encrypted %s location", dev_name, op_type)
+                    continue
+                source = nested
+            elif nested:
+                # Present but not an object (e.g. an opaque encrypted blob): unreadable here.
+                saw_encrypted = True
+                _report_skip_once(dev_name, op, "encLocation is not a readable object")
                 continue
-            if 'gpsUtcDt' not in loc:
-                 continue
-            utc_date = parse_stf_date(loc['gpsUtcDt'])
-            op_data = loc
-        
-        if not op_data or not utc_date:
-            continue
-            
-        # Check if newer
-        if used_loc['gps_date'] and used_loc['gps_date'] >= utc_date:
-            _LOGGER.debug(f"[{dev_name}] Ignoring older location ({op['oprnType']})")
-            continue
-            
-        # Extract coordinates
-        lat = float(op_data['latitude']) if 'latitude' in op_data else None
-        lon = float(op_data['longitude']) if 'longitude' in op_data else None
-        
-        if lat is None or lon is None:
-             _LOGGER.warning(f"[{dev_name}] Missing coordinates in {op['oprnType']}")
-             # If we have no coords, we preserve 'location_found'=False (implicit by None result)
-             # But we might want to track accuracy/date still? 
-             # The original code only set location_found=True if lat/lon existed.
-             # But it accepted the OP as 'used_op' anyway?
-             # "if not locFound: warn ... used_loc['gps_accuracy'] = ... used_op = op"
-             # Yes, it updates date/accuracy even if lat/lon missing.
-             pass
-        
-        used_loc['latitude'] = lat
-        used_loc['longitude'] = lon
-        used_loc['gps_accuracy'] = calc_gps_accuracy(
-            op_data.get('horizontalUncertainty'), op_data.get('verticalUncertainty'))
-        used_loc['gps_date'] = utc_date
-        used_op = op
 
-    if used_op:
-        return used_op, used_loc
-    return None, None
+        lat = _to_float(source.get("latitude"))
+        lon = _to_float(source.get("longitude"))
+        if lat is None or lon is None:
+            # Routine for operations that carry no position at all (e.g. a failed request).
+            _report_skip_once(dev_name, op, "no usable coordinates", level=logging.INFO)
+            continue
+
+        extra = op.get("extra") if isinstance(op.get("extra"), dict) else {}
+        utc_date = _parse_stf_date_safe(
+            extra.get("gpsUtcDt") or source.get("gpsUtcDt") or op.get("gpsUtcDt"))
+        if utc_date is None:
+            # The fix has coordinates but no timestamp of its own: use the time Samsung
+            # recorded the operation rather than throw a real position away.
+            for key in ("oprnDoneDate", "oprnCrtDate"):
+                utc_date = _parse_stf_date_safe(op.get(key))
+                if utc_date is not None:
+                    break
+        if utc_date is None:
+            _report_skip_once(dev_name, op, "coordinates but no usable date")
+            continue
+
+        if best_loc and best_loc["gps_date"] >= utc_date:
+            _LOGGER.debug("[%s] Ignoring older location (%s)", dev_name, op_type)
+            continue
+
+        best_loc = {
+            "latitude": lat,
+            "longitude": lon,
+            "gps_accuracy": calc_gps_accuracy(
+                source.get("horizontalUncertainty", op.get("horizontalUncertainty")),
+                source.get("verticalUncertainty", op.get("verticalUncertainty"))),
+            "gps_date": utc_date,
+        }
+        best_op = op
+
+    if best_op is None:
+        if saw_encrypted:
+            _report_skip_once(
+                dev_name, {"oprnType": "encrypted"},
+                "only end-to-end encrypted positions were returned, which can't be read here")
+        return None, None
+    return best_op, best_loc
+
+
 async def _get_web_client(hass: HomeAssistant, entry_id: str, force_new: bool = False) -> aiohttp.ClientSession:
     """Returns a dedicated aiohttp session for smartthingsfind.samsung.com calls, isolated
     from HA's long-lived shared session (which stays in use for the SmartThings OAuth
@@ -1696,7 +1775,6 @@ async def get_fmm_device_location(
     dev_id = dev_data.get('device_id')
     dev_name = dev_data.get('name') or dev_id or "SmartThings Find"
     web_dvce_id = dev_data.get("web_dvce_id")
-    data_store = hass.data[DOMAIN][entry_id]
 
     fail = {
         "dev_name": dev_name,
@@ -1779,12 +1857,41 @@ async def get_fmm_device_location(
                 dev_name, status, raw_text,
             )
             return fail
+        if not isinstance(body, dict):
+            _LOGGER.warning(
+                "[%s] FMM location fetch returned an unexpected payload (%s)", dev_name, type(body).__name__)
+            return fail
         if body.get("resultCode") not in (None, "00"):
             _LOGGER.warning("[%s] FMM location fetch rejected: resultCode=%s", dev_name, body.get("resultCode"))
             return fail
 
-        operations = body.get("operation", [])
-        used_op, used_loc = extract_best_location(operations, dev_name)
+        # From here on the read itself has worked. What's in the answer is a separate
+        # question: an entry we can't make sense of must never turn the device Unavailable
+        # (update_success is about reaching Samsung, not about how clean its data is).
+        operations = body.get("operation")
+        if not isinstance(operations, list):
+            operations = []
+        try:
+            used_op, used_loc = extract_best_location(operations, dev_name)
+        except Exception:
+            # extract_best_location is written not to raise. If it ever does, that's a gap
+            # in how we read Samsung's data, so say so once and carry on with what we knew.
+            if not dev_data.get('_parse_error_logged'):
+                dev_data['_parse_error_logged'] = True
+                _LOGGER.warning(
+                    "[%s] Couldn't interpret the location data Samsung returned, showing the last "
+                    "known position instead", dev_name, exc_info=True)
+            used_op, used_loc = None, None
+
+        if used_loc:
+            dev_data['_last_good_loc'] = (used_op, used_loc)
+        elif dev_data.get('_last_good_loc'):
+            # Nothing usable in this answer (an entry we can't read, or Samsung's history no
+            # longer holds a position). Keep showing the last position we did have - its own
+            # age is what flags it as stale below - rather than blanking the entity.
+            used_op, used_loc = dev_data['_last_good_loc']
+            _LOGGER.debug("[%s] No usable position in this read, keeping the last known one", dev_name)
+
         _LOGGER.debug(
             "[%s] Passive read newest fix timestamp: gps_date=%s (compare across cycles to tell whether "
             "the server actually has fresher data, vs. the active push just not waking the device)",
@@ -1799,23 +1906,25 @@ async def get_fmm_device_location(
         # watches, PCs when off/asleep) can only ever show whatever it last reported on
         # its own, which can be hours or days old with nothing wrong going on. Flag that
         # clearly instead of presenting it identically to a device that just updated,
-        # so a stale position is never mistaken for a fresh one.
+        # so a stale position is never mistaken for a fresh one. "Old" is judged against
+        # this device's own polling interval (set by the coordinator), as three polls.
         active_location_supported = not dev_data.get('_active_location_unsupported')
         gps_date = (used_loc or {}).get("gps_date")
         position_stale = False
         if gps_date:
-            update_interval = data_store.get(CONF_UPDATE_INTERVAL, CONF_UPDATE_INTERVAL_DEFAULT)
-            stale_after = timedelta(seconds=max(update_interval * 3, 1800))
-            now = datetime.now(gps_date.tzinfo) if gps_date.tzinfo else datetime.now()
-            position_stale = (now - gps_date) > stale_after
+            interval = dev_data.get('_poll_interval_s') or CONF_UPDATE_INTERVAL_DEFAULT
+            stale_after = timedelta(seconds=max(interval * 3, 1800))
+            position_stale = (datetime.now(pytz.UTC) - gps_date) > stale_after
 
         # Extra diagnostic info the website's setLastSelect.do already includes in the
         # same response - no extra request needed. Field semantics beyond their literal
         # names aren't documented anywhere (undocumented API), so these are passed
         # through close to raw rather than reinterpreted/relabeled.
-        last_selected = body.get("lastSelectedDevice") or {}
+        last_selected = body.get("lastSelectedDevice")
+        if not isinstance(last_selected, dict):
+            last_selected = {}
         menu_flat = {}
-        for entry in body.get("menu", []):
+        for entry in body.get("menu") or []:
             if isinstance(entry, dict):
                 menu_flat.update(entry)
         web_capabilities = {
@@ -2112,6 +2221,28 @@ async def stop_ring_device(
     return False, "unsupported_device"
 
 
+def is_in_active_zone(hass: HomeAssistant, used_loc: dict | None) -> bool:
+    """True when a position falls inside one of Home Assistant's zones.
+
+    It is the same test the device_tracker uses to decide its own state (home / a zone's name /
+    not_home): the closest non-passive zone that contains the point, with the fix's accuracy
+    counted in. Used to pick which polling interval a device gets. Anything that stops it
+    giving an answer (no position, zones not loaded) counts as "not in a zone", which is the
+    safe side: the device is then polled at the general interval.
+    """
+    try:
+        latitude = (used_loc or {}).get("latitude")
+        longitude = (used_loc or {}).get("longitude")
+        if latitude is None or longitude is None:
+            return False
+        from homeassistant.components import zone
+        return zone.async_active_zone(
+            hass, latitude, longitude, (used_loc or {}).get("gps_accuracy") or 0) is not None
+    except Exception:
+        _LOGGER.debug("Couldn't check zone membership, treating the device as outside any zone", exc_info=True)
+        return False
+
+
 def google_maps_url(latitude, longitude) -> str | None:
     """Build a Google Maps link for a coordinate pair, or None if it is incomplete."""
     if latitude is None or longitude is None:
@@ -2140,50 +2271,31 @@ def update_device_maps_link(hass: HomeAssistant, device_id: str, used_loc: dict 
     registry.async_update_device(ha_dev.id, configuration_url=url)
 
 
-def calc_gps_accuracy(hu: float, vu: float) -> float:
+def calc_gps_accuracy(hu, vu) -> float | None:
     """
     Calculate the GPS accuracy using the Pythagorean theorem.
     Returns the combined GPS accuracy based on the horizontal
-    and vertical uncertainties provided by the API
+    and vertical uncertainties provided by the API.
+
+    Either value may be missing (positions reported by other devices often carry only a
+    horizontal one): the one that's there is used on its own. None if neither is usable.
 
     Args:
-        hu (float): Horizontal uncertainty.
-        vu (float): Vertical uncertainty.
+        hu: Horizontal uncertainty.
+        vu: Vertical uncertainty.
 
     Returns:
-        float: Calculated GPS accuracy.
+        float | None: Calculated GPS accuracy.
     """
-    try:
-        return round((float(hu)**2 + float(vu)**2) ** 0.5, 1)
-    except ValueError:
+    horizontal = _to_float(hu)
+    vertical = _to_float(vu)
+    if horizontal is None and vertical is None:
         return None
-
-
-def get_sub_location(ops: list, subDeviceName: str) -> tuple:
-    """
-    Extracts sub-location data for devices that contain multiple
-    sub-locations (e.g., left and right earbuds).
-
-    Args:
-        ops (list): List of operations from the API.
-        subDeviceName (str): Name of the sub-device.
-
-    Returns:
-        tuple: The operation and sub-location data.
-    """
-    if not ops or not subDeviceName or len(ops) < 1:
-        return {}, {}
-    for op in ops:
-        if subDeviceName in op.get('encLocation', {}):
-            loc = op['encLocation'][subDeviceName]
-            sub_loc = {
-                "latitude": float(loc['latitude']),
-                "longitude": float(loc['longitude']),
-                "gps_accuracy": calc_gps_accuracy(loc.get('horizontalUncertainty'), loc.get('verticalUncertainty')),
-                "gps_date": parse_stf_date(loc['gpsUtcDt'])
-            }
-            return op, sub_loc
-    return {}, {}
+    if vertical is None:
+        return round(horizontal, 1)
+    if horizontal is None:
+        return round(vertical, 1)
+    return round((horizontal ** 2 + vertical ** 2) ** 0.5, 1)
 
 
 def parse_stf_date(datestr: str) -> datetime:
