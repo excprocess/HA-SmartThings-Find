@@ -1952,6 +1952,7 @@ async def get_fmm_device_location(
         return {**fail, "update_success": True, "fetch_error": "Website device ID is not resolved"}
 
     active_location_error = None
+    active_location_attempted = False
     if dev_data.get('_active_location_unsupported'):
         # Samsung explicitly rejected LOCATION for this device as unsupported
         # (resultCode=501 - seen consistently for buds/non-LTE watches, which have no
@@ -1969,6 +1970,7 @@ async def get_fmm_device_location(
         # only makes things worse; let the passive read's own retry-with-fresh-bootstrap
         # do its job first. A manual button press (force_active=True) always goes through
         # regardless, since that's an explicit one-off request from the user.
+        active_location_attempted = True
         active_success, active_reason = await perform_fmm_operation(
             hass,
             session,
@@ -2010,11 +2012,13 @@ async def get_fmm_device_location(
                 details={"reason": "web_session_unavailable", "force_refresh": force_refresh},
             )
             return None, None
+        current_web_dvce_id = dev_data.get("web_dvce_id") or web_dvce_id
+        device_id_refreshed = current_web_dvce_id != web_dvce_id
         web_client = await _get_web_client(hass, entry_id)
         async with web_client.post(
             "https://smartthingsfind.samsung.com/device/setLastSelect.do",
             params={"_csrf": csrf},
-            json={"dvceId": web_dvce_id, "removeDevice": []},
+            json={"dvceId": current_web_dvce_id, "removeDevice": []},
             headers={"Accept": "application/json"},
             cookies={"JSESSIONID": jsessionid},
         ) as res:
@@ -2028,13 +2032,20 @@ async def get_fmm_device_location(
             "setLastSelect.do",
             http_status=status,
             outcome="success" if status == 200 and isinstance(body, dict) else "http_error",
-            details={"force_refresh": force_refresh},
+            details={
+                "force_refresh": force_refresh,
+                "device_id_refreshed": device_id_refreshed,
+                "refresh_after_active_location": active_location_attempted and force_refresh,
+            },
             response=body if isinstance(body, dict) else None,
         )
         return status, body
 
     try:
-        status, body = await _fetch(False)
+        # Match the documented Find web flow: after an active LOCATION operation, create
+        # a fresh website session before reading the resulting location. The bootstrap
+        # also re-resolves the website device ID, so _fetch uses that refreshed ID.
+        status, body = await _fetch(active_location_attempted)
         if status != 200 or body is None:
             # The cached web session may have gone stale - bootstrap a fresh one and retry once.
             status, body = await _fetch(True)

@@ -1,5 +1,11 @@
 # Changelog
 
+## 8.1.5
+
+### Fixed
+- After an active Find My Mobile `LOCATION` request, the integration now bootstraps a fresh website session before reading the location, matching the documented Find flow. The read uses the device ID re-resolved for that session.
+- Request history records whether the post-operation read used a fresh session and whether the website device ID changed.
+
 ## 8.1.4
 
 ### Changed
