@@ -22,6 +22,8 @@ See [Credits](#credits) for everything this fork builds on.
 
 ## What's new in 8.1
 
+- **8.1.7:** Each Galaxy Buds device gets one active location attempt when Home Assistant starts. If Samsung returns no readable coordinates, the Location Retrieval Error entity explains that result and the request history retains diagnostics.
+- **8.1.6:** When a passive Find My Mobile read returns no readable fix or only a stale fix from a cached website session, one fresh-session passive retry is made per device and Home Assistant runtime. Diagnostics now show the operation and parser details without exposing coordinates. HTTP 429 responses back off before retrying.
 - **8.1.5:** After active Find My Mobile location requests, the integration opens a fresh website session and re-reads the device location using the device ID resolved for that session.
 - **8.1.4:** Active Find My Mobile location requests wait up to 60 seconds for Samsung to complete them. The `next_update_local` tracker attribute is now an ISO 8601 timestamp suitable for Home Assistant templates. Redundant `dev_name` and `icon_url` tracker attributes are omitted.
 - **Separate polling interval for devices inside a zone** (see [Update intervals](#update-intervals)).

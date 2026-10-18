@@ -258,13 +258,13 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                 fetch_ok = bool(tag_data.get('update_success'))
                 if fetch_ok:
                     dev_data['_consecutive_fetch_failures'] = 0
+                    dev_data.pop('_rate_limit_failures', None)
                     self.schedule_device(dev_data, tag_data, now)
                 else:
                     # This cycle's fetch failed outright (session hiccup, transient HTTP
                     # error, ...) rather than just "no fresher position available yet".
                     # Retry on the very next tick, whatever interval the device is on: a
                     # failure must not wait out a long in-zone interval.
-                    dev_data['_next_poll'] = 0
                     # Bridge over a SHORT run of these with the last known good position,
                     # so a one-off blip doesn't make the entity flash Unavailable - but
                     # only for a bounded number of consecutive cycles, and every cycle
@@ -276,10 +276,22 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                     # anything is wrong.
                     failures = dev_data.get('_consecutive_fetch_failures', 0) + 1
                     dev_data['_consecutive_fetch_failures'] = failures
+                    if tag_data.get('rate_limited') or tag_data.get('http_status') == 429:
+                        rate_limit_failures = dev_data.get('_rate_limit_failures', 0) + 1
+                        dev_data['_rate_limit_failures'] = rate_limit_failures
+                        retry_after = min(3600, 300 * (2 ** min(rate_limit_failures - 1, 4)))
+                        dev_data['_next_poll'] = now + retry_after
+                        _LOGGER.warning(
+                            "[%s] Samsung rate limited location retrieval; backing off for %ss",
+                            dev_name, retry_after,
+                        )
+                    else:
+                        dev_data['_next_poll'] = 0
+                        retry_after = min(self.away_interval, self.in_zone_interval)
                     prev_tag_data = previous.get(dev_data['device_id'])
                     failed_tag_data = tag_data
                     failed_tag_data['next_update_at'] = datetime.now(timezone.utc) + timedelta(
-                        seconds=min(self.away_interval, self.in_zone_interval)
+                        seconds=retry_after
                     )
                     failed_tag_data['next_update_mode'] = 'passive'
                     if (

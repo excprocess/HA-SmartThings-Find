@@ -1050,11 +1050,7 @@ def _record_fmm_request(
         operations = response.get("operation")
         if isinstance(operations, list):
             record["returned_operations"] = [
-                {
-                    key: op.get(key)
-                    for key in ("oprnType", "oprnStsCd", "oprnResultCode")
-                    if op.get(key) is not None
-                }
+                _summarize_location_operation(op)
                 for op in operations
                 if isinstance(op, dict)
             ][:10]
@@ -1112,6 +1108,41 @@ def _summarize_op(op: dict) -> str:
     if isinstance(extra, dict) and extra.get("gpsUtcDt"):
         dates["extra.gpsUtcDt"] = extra["gpsUtcDt"]
     return f"keys={shape} dates={dates}"
+
+
+def _summarize_location_operation(op: dict) -> dict:
+    """Return a coordinate-free summary explaining why a location was usable or skipped."""
+    nested = op.get("encLocation")
+    nested_dict = nested if isinstance(nested, dict) else {}
+    extra = op.get("extra") if isinstance(op.get("extra"), dict) else {}
+    timestamps = {
+        key: value
+        for key, value in (
+            ("extra.gpsUtcDt", extra.get("gpsUtcDt")),
+            ("gpsUtcDt", op.get("gpsUtcDt")),
+            ("oprnDoneDate", op.get("oprnDoneDate")),
+            ("oprnCrtDate", op.get("oprnCrtDate")),
+        )
+        if value not in (None, "")
+    }
+    return {
+        "type": op.get("oprnType"),
+        "status": op.get("oprnStsCd"),
+        "result_code": op.get("oprnResultCode"),
+        "has_top_level_coordinates": (
+            op.get("latitude") is not None and op.get("longitude") is not None
+        ),
+        "has_nested_coordinates": (
+            nested_dict.get("latitude") is not None
+            and nested_dict.get("longitude") is not None
+        ),
+        "enc_location_shape": _describe_value(nested) if "encLocation" in op else "absent",
+        "encrypted": bool(nested_dict.get("encrypted")) or (
+            "encLocation" in op and not isinstance(nested, dict) and nested not in (None, "")
+        ),
+        "timestamp_fields": timestamps,
+        "keys": sorted(str(key) for key in op),
+    }
 
 
 def _report_skip_once(dev_name: str, op: dict, reason: str, level: int = logging.WARNING) -> None:
@@ -1575,6 +1606,7 @@ async def enrich_devices_with_web_metadata(
         # PHONE is the only deviceTypeCode the website itself exposes a Ring button for
         # (confirmed against the real site - PC/watch/buds have no ring UI there either).
         dev["web_device_type_code"] = str(match.get("deviceTypeCode") or "").upper()
+        dev["is_buds"] = dev["web_device_type_code"] == "BUDS"
 
         if dev.get("is_fmm"):
             _LOGGER.debug(
@@ -1736,6 +1768,13 @@ async def get_devices(hass: HomeAssistant, session: aiohttp.ClientSession, entry
         await enrich_devices_with_web_metadata(hass, session, entry_id, all_devices)
     except Exception as e:
         _LOGGER.debug("[diag] Web metadata enrichment raised at top level: %s", e, exc_info=True)
+
+    # Buds often need the Find network to report their last known location. Give each
+    # Buds device exactly one active LOCATION attempt on startup, then let normal
+    # scheduled reads remain passive unless its Active Location switch is enabled.
+    for device in all_devices:
+        if device.get("is_buds"):
+            device["_startup_active_location_pending"] = True
 
     return devices
 
@@ -1953,14 +1992,24 @@ async def get_fmm_device_location(
 
     active_location_error = None
     active_location_attempted = False
+    startup_active_location = bool(dev_data.pop("_startup_active_location_pending", False))
     if dev_data.get('_active_location_unsupported'):
         # Samsung explicitly rejected LOCATION for this device as unsupported
         # (resultCode=501 - seen consistently for buds/non-LTE watches, which have no
         # network connection of their own to push a fix to) at some point this runtime.
         # No point spending ~7 requests worth of polling on that again every cycle;
         # retried fresh only after the next restart/reload, in case that ever changes.
-        pass
-    elif force_active or (dev_data.get("active_location_requested") and not dev_data.get('_consecutive_fetch_failures')):
+        _record_fmm_request(
+            request_history,
+            "active_location",
+            outcome="skipped",
+            details={"reason": "device_previously_returned_unsupported", "manual_request": force_active},
+        )
+    elif (
+        force_active
+        or startup_active_location
+        or (dev_data.get("active_location_requested") and not dev_data.get('_consecutive_fetch_failures'))
+    ):
         # active_location_requested is set live by ActiveLocationSwitch (switch.py) -
         # a per-device toggle, replacing the old global "active mode" options that used
         # to live in the integration's options flow. The automatic (non-force_active)
@@ -1980,6 +2029,13 @@ async def get_fmm_device_location(
             poll_seconds=FMM_LOCATION_POLL_SECONDS,
             request_history=request_history,
         )
+        if startup_active_location:
+            _record_fmm_request(
+                request_history,
+                "active_location_startup",
+                outcome="completed" if active_success else "failed",
+                details={"result_code": active_reason},
+            )
         active_location_error = None if active_success else (
             f"Samsung active location request failed (resultCode={active_reason})"
             if active_reason else "Samsung did not complete the active location request (timeout or no response)"
@@ -1994,6 +2050,18 @@ async def get_fmm_device_location(
         # Whether or not it succeeded/timed out, fall through to the normal passive read
         # below - extract_best_location() picks the newest fix regardless of how the
         # freshest one got there, and a passive read still returns the best data we have.
+    else:
+        skip_reason = (
+            "consecutive_fetch_failures"
+            if dev_data.get("_consecutive_fetch_failures")
+            else "active_location_switch_off"
+        )
+        _record_fmm_request(
+            request_history,
+            "active_location",
+            outcome="skipped",
+            details={"reason": skip_reason, "manual_request": force_active},
+        )
     fail["active_location_error"] = active_location_error
 
     async def _fetch(force_refresh: bool):
@@ -2042,10 +2110,14 @@ async def get_fmm_device_location(
         return status, body
 
     try:
+        session_was_cached = bool(
+            hass.data.get(DOMAIN, {}).get(entry_id, {}).get("_web_session_cache")
+        )
         # Match the documented Find web flow: after an active LOCATION operation, create
-        # a fresh website session before reading the resulting location. The bootstrap
-        # also re-resolves the website device ID, so _fetch uses that refreshed ID.
-        status, body = await _fetch(active_location_attempted)
+        # a fresh website session before reading the resulting location. An explicit
+        # manual press also gets a fresh passive read if active LOCATION was previously
+        # marked unsupported for this device.
+        status, body = await _fetch(active_location_attempted or force_active)
         if status != 200 or body is None:
             # The cached web session may have gone stale - bootstrap a fresh one and retry once.
             status, body = await _fetch(True)
@@ -2085,6 +2157,107 @@ async def get_fmm_device_location(
             used_op, used_loc = None, None
             location_diagnostics["parser_error"] = True
 
+        previous_good = dev_data.get('_last_good_loc')
+        previous_gps_date = (
+            (previous_good[1] or {}).get('gps_date')
+            if isinstance(previous_good, tuple) and len(previous_good) == 2
+            else None
+        )
+        current_gps_date = (used_loc or {}).get('gps_date')
+        stale_after_seconds = max(
+            int(dev_data.get('_poll_interval_s') or CONF_UPDATE_INTERVAL_DEFAULT) * 3,
+            1800,
+        )
+        is_old_position = bool(
+            current_gps_date
+            and (datetime.now(pytz.UTC) - current_gps_date).total_seconds() > stale_after_seconds
+        )
+        no_new_position = bool(
+            used_loc is None
+            or (previous_gps_date and current_gps_date and current_gps_date <= previous_gps_date)
+            or is_old_position
+        )
+
+        # A successful but stale passive response can be a stale website-session view,
+        # unlike an HTTP error which is already retried above. Try one fresh-session
+        # passive read per device runtime; never send an active LOCATION operation here.
+        # The explicit Update Location button remains the user's way to force another try.
+        if (
+            not active_location_attempted
+            and not force_active
+            and session_was_cached
+            and no_new_position
+            and not dev_data.get("_passive_session_retry_done")
+        ):
+            retry_reason = (
+                "no_readable_position" if used_loc is None
+                else "position_unchanged" if previous_gps_date and current_gps_date <= previous_gps_date
+                else "position_is_stale"
+            )
+            dev_data["_passive_session_retry_done"] = True
+            _record_fmm_request(
+                request_history,
+                "passive_session_refresh",
+                outcome="attempted",
+                details={"reason": retry_reason, "active_request_sent": False},
+            )
+            retry_status, retry_body = await _fetch(True)
+            if (
+                retry_status == 200
+                and isinstance(retry_body, dict)
+                and retry_body.get("resultCode") in (None, "00")
+            ):
+                retry_operations = retry_body.get("operation")
+                if not isinstance(retry_operations, list):
+                    retry_operations = []
+                retry_diagnostics = {}
+                retry_op, retry_loc = extract_best_location(
+                    retry_operations, dev_name, retry_diagnostics
+                )
+                retry_date = (retry_loc or {}).get("gps_date")
+                first_date = (used_loc or {}).get("gps_date")
+                if retry_loc and (not used_loc or (retry_date and first_date and retry_date > first_date)):
+                    body = retry_body
+                    operations = retry_operations
+                    used_op, used_loc = retry_op, retry_loc
+                    location_diagnostics = retry_diagnostics
+                    current_gps_date = retry_date
+                    _record_fmm_request(
+                        request_history,
+                        "passive_session_refresh",
+                        outcome="position_available",
+                        details={"position_time": retry_date.isoformat() if retry_date else None},
+                    )
+                else:
+                    # Prefer a readable location from the fresh response only when it
+                    # is newer. If refresh returns no coordinates, keep the usable
+                    # location from the initial passive response rather than erasing it.
+                    if not used_loc or (
+                        retry_loc
+                        and retry_date
+                        and first_date
+                        and retry_date > first_date
+                    ):
+                        body = retry_body
+                        operations = retry_operations
+                        used_op, used_loc = retry_op, retry_loc
+                        location_diagnostics = retry_diagnostics
+                        current_gps_date = retry_date
+                    _record_fmm_request(
+                        request_history,
+                        "passive_session_refresh",
+                        outcome="no_new_position",
+                        details={"position_time": retry_date.isoformat() if retry_date else None},
+                    )
+            else:
+                _record_fmm_request(
+                    request_history,
+                    "passive_session_refresh",
+                    http_status=retry_status,
+                    outcome="refresh_read_failed",
+                    details={"active_request_sent": False},
+                )
+
         position_error = None
         if not used_loc:
             if location_diagnostics.get("parser_error"):
@@ -2095,13 +2268,11 @@ async def get_fmm_device_location(
                 position_error = "Samsung returned location entries without usable coordinates or timestamps"
             else:
                 position_error = "Samsung returned no readable location for this device"
+            if active_location_attempted and active_location_error is None:
+                active_location_error = (
+                    "Samsung completed the active location request but returned no readable coordinates"
+                )
 
-        previous_good = dev_data.get('_last_good_loc')
-        previous_gps_date = (
-            (previous_good[1] or {}).get('gps_date')
-            if isinstance(previous_good, tuple) and len(previous_good) == 2
-            else None
-        )
         gps_accuracy = (used_loc or {}).get('gps_accuracy')
         low_accuracy = gps_accuracy is not None and gps_accuracy > LOW_ACCURACY_THRESHOLD_M
         if low_accuracy:
@@ -2126,6 +2297,20 @@ async def get_fmm_device_location(
                 )
                 for op in operations
             )
+            operation_type_counts = {}
+            for op in operations:
+                if isinstance(op, dict):
+                    op_type = str(op.get("oprnType") or "UNKNOWN")
+                    operation_type_counts[op_type] = operation_type_counts.get(op_type, 0) + 1
+            location_entries = [
+                _summarize_location_operation(op)
+                for op in operations
+                if isinstance(op, dict) and op.get("oprnType") in LOCATION_OP_TYPES
+            ][:8]
+            parser_diagnostics = {
+                key: sorted(value) if isinstance(value, set) else value
+                for key, value in location_diagnostics.items()
+            }
             _record_fmm_request(
                 request_history,
                 "location_result",
@@ -2140,6 +2325,11 @@ async def get_fmm_device_location(
                         0, int((datetime.now(pytz.UTC) - current_gps_date).total_seconds())
                     ) if current_gps_date else None,
                     "response_contains_coordinates": response_has_coordinates,
+                    "operation_count": len(operations),
+                    "operation_type_counts": operation_type_counts,
+                    "location_entries": location_entries,
+                    "parser_diagnostics": parser_diagnostics,
+                    "selected_operation": used_op.get("oprnType") if isinstance(used_op, dict) else None,
                     "gps_accuracy_m": gps_accuracy,
                     "accuracy_warning_threshold_m": LOW_ACCURACY_THRESHOLD_M,
                     "position_updated": received_new_fix,
@@ -2159,6 +2349,14 @@ async def get_fmm_device_location(
             "[%s] Passive read newest fix timestamp: gps_date=%s (compare across cycles to tell whether "
             "the server actually has fresher data, vs. the active push just not waking the device)",
             dev_name, (used_loc or {}).get("gps_date"),
+        )
+        _LOGGER.debug(
+            "[%s] FMM passive response summary: operations=%s location_entries=%s parser=%s selected=%s",
+            dev_name,
+            operation_type_counts if request_history is not None else len(operations),
+            location_entries if request_history is not None else "not recorded",
+            parser_diagnostics if request_history is not None else location_diagnostics,
+            used_op.get("oprnType") if isinstance(used_op, dict) else None,
         )
 
         # No battery_level here: DeviceBatterySensor is only created for trackers
@@ -2281,7 +2479,10 @@ async def get_device_location(hass: HomeAssistant, session: aiohttp.ClientSessio
                 "dev_name": dev_name,
                 "dev_id": dev_id,
                 "update_success": False,
-                "location_found": False
+                "location_found": False,
+                "fetch_error": f"SmartThings location request failed (HTTP {status})",
+                "http_status": status,
+                "rate_limited": status == 429,
             }
 
         status_code, message, error_code = _parse_installed_apps_response(response)
@@ -2310,7 +2511,10 @@ async def get_device_location(hass: HomeAssistant, session: aiohttp.ClientSessio
                 "dev_name": dev_name,
                 "dev_id": dev_id,
                 "update_success": False,
-                "location_found": False
+                "location_found": False,
+                "fetch_error": f"SmartThings location response failed ({status_code}/{error_code})",
+                "http_status": status_code,
+                "rate_limited": status_code == 429,
             }
 
         items = message.get("items", [])

@@ -1,5 +1,19 @@
 # Changelog
 
+## 8.1.7
+
+### Changed
+- Each Galaxy Buds device gets one active `LOCATION` attempt during Home Assistant startup, then scheduled reads stay passive unless Active Location is enabled. The attempt and outcome are recorded in request history.
+- If the active attempt completes without readable coordinates, **Location Retrieval Error** now explains that Samsung returned no coordinates; the last known position remains available and the response diagnostics are retained for investigation.
+
+## 8.1.6
+
+### Changed
+- If a passive Find My Mobile read has no readable position or only a stale position from a cached website session, the integration makes one passive read with a newly bootstrapped session per device and Home Assistant runtime. This does not send an active `LOCATION` request; the manual **Update Location** button still forces a fresh read.
+- Find My Mobile request history and debug logs now summarize returned operation types, result codes, coordinate presence, encryption shape, timestamp fields, parser skips, and the selected operation without recording coordinates or credentials.
+- Active-location requests skipped because the switch is off, a failure streak is active, or Samsung previously marked the device unsupported are now identified in request history.
+- SmartThings location responses with HTTP/result code 429 now use exponential retry backoff, starting at five minutes and capped at one hour.
+
 ## 8.1.5
 
 ### Fixed
