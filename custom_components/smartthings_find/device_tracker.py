@@ -4,6 +4,7 @@ from homeassistant.components.device_tracker import TrackerEntity as DeviceTrack
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
@@ -20,7 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities += [SmartThingsDeviceTracker(hass, coordinator, device)]
     async_add_entities(entities)
 
-class SmartThingsDeviceTracker(DeviceTrackerEntity):
+class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
     """Representation of a SmartTag device tracker."""
 
     def __init__(self, hass: HomeAssistant, coordinator, device):
@@ -54,6 +55,31 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity):
         """
         await super().async_added_to_hass()
         data = self.coordinator.data.get(self.device_id, {}) or {}
+        # A reload starts with an empty coordinator cache. If Samsung's first request
+        # fails, keep the last coordinates Home Assistant had instead of making a
+        # previously located device disappear until the next successful poll.
+        if not data.get('location_found'):
+            old_state = await self.async_get_last_state()
+            old_attrs = old_state.attributes if old_state else {}
+            latitude = old_attrs.get('latitude')
+            longitude = old_attrs.get('longitude')
+            if latitude is not None and longitude is not None:
+                gps_date = old_attrs.get('last_seen') or old_attrs.get('last_seen_local')
+                if isinstance(gps_date, str):
+                    gps_date = dt_util.parse_datetime(gps_date)
+                restored_loc = {
+                    'latitude': latitude,
+                    'longitude': longitude,
+                    'gps_accuracy': old_attrs.get('gps_accuracy', 0),
+                    'gps_date': gps_date,
+                }
+                data = dict(data)
+                data.update({
+                    'used_loc': restored_loc,
+                    'location_found': True,
+                    'restored_position': True,
+                })
+                self.coordinator.data[self.device_id] = data
         if data.get('location_found'):
             update_device_maps_link(self.hass, self.device_id, data.get('used_loc'))
 
@@ -70,7 +96,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity):
         if not tag_data:
             _LOGGER.info(f"tag_data none for '{self.name}'; rendering state unavailable")
             return False
-        if not tag_data.get('update_success'):
+        if not tag_data.get('update_success') and not tag_data.get('location_found'):
             _LOGGER.info(f"Last update for '{self.name}' failed; rendering state unavailable")
             return False
         return True

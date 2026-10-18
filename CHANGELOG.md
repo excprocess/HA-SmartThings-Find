@@ -1,5 +1,12 @@
 # Changelog
 
+## 8.1.9
+
+### Changed
+- Device trackers expose `fmm_api_calls_last_update` and `fmm_api_calls_total`. They count actual FMM HTTP request attempts per device, including failed attempts; cache reuse, skipped operations, and response parsing are not counted. The total is for the current Home Assistant run.
+- The **Update Location** button reports success only when Samsung returns a position newer than the one already shown.
+- On reload, a tracker restores its last known Home Assistant coordinates if the first Samsung poll fails, keeping the device visible while retrying.
+
 ## 8.1.8
 
 ### Changed

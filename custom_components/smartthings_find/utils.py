@@ -1041,6 +1041,13 @@ def _record_fmm_request(
         "http_status": http_status,
         "result_code": result_code,
         "outcome": outcome,
+        # Mark only actual HTTP request attempts. Cache reuse, parser summaries,
+        # and skipped operations are diagnostic events, not API calls.
+        "api_call": endpoint in {
+            "authorize", "authorize_retry", "getState.do", "login.do",
+            "chkLogin.do", "setLastSelect.do", "addOperation.do",
+            "getOperationResult.do",
+        } and outcome != "skipped",
     }
     if details:
         record.update(details)

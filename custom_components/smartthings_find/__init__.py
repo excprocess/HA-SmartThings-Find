@@ -258,6 +258,15 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                 previous_request_ids = {id(request) for request in history}
                 tag_data = await get_device_location(self.hass, self.session, dev_data, self.entry_id)
                 request_history = tag_data.get('fmm_request_history') or []
+                new_api_calls = sum(
+                    1 for request in request_history
+                    if id(request) not in previous_request_ids and request.get('api_call')
+                )
+                dev_data['_fmm_api_calls_total'] = (
+                    dev_data.get('_fmm_api_calls_total', 0) + new_api_calls
+                )
+                tag_data['fmm_api_calls_last_update'] = new_api_calls
+                tag_data['fmm_api_calls_total'] = dev_data['_fmm_api_calls_total']
                 for request in request_history:
                     if id(request) not in previous_request_ids:
                         _LOGGER.info("[%s] FMM request: %s", dev_name, request)
@@ -325,6 +334,8 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                         tag_data['fmm_request_history'] = failed_tag_data.get(
                             'fmm_request_history', tag_data.get('fmm_request_history', [])
                         )
+                        tag_data['fmm_api_calls_last_update'] = new_api_calls
+                        tag_data['fmm_api_calls_total'] = dev_data['_fmm_api_calls_total']
                     elif failures > MAX_STALE_FALLBACK_CYCLES:
                         _LOGGER.warning(
                             "[%s] Fetch has failed %s cycles in a row - showing as unavailable "

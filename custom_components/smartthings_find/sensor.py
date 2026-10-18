@@ -56,6 +56,7 @@ class DeviceBatterySensor(SensorEntity):
         self._attr_device_info = device['ha_dev_info']
         self._attr_device_class = SensorDeviceClass.BATTERY
         self._attr_state_class = SensorStateClass.MEASUREMENT
+        self.async_update = coordinator.async_add_listener(self.async_write_ha_state)
 
     @property
     def available(self) -> bool:
@@ -102,6 +103,7 @@ class DeviceLocationSensor(SensorEntity):
         self.device = device['data']
         self.device_id = device_id
         self._attr_device_info = device['ha_dev_info']
+        self.async_update = coordinator.async_add_listener(self.async_write_ha_state)
 
     def _used_loc(self) -> dict:
         tag_data = self.coordinator.data.get(self.device_id, {}) or {}
@@ -116,7 +118,7 @@ class DeviceLocationSensor(SensorEntity):
         if not tag_data:
             _LOGGER.info(f"location sensor: tag_data none for '{self.name}'; rendering state unavailable")
             return False
-        if not tag_data.get('update_success'):
+        if not tag_data.get('update_success') and not tag_data.get('location_found'):
             _LOGGER.info(f"Last update for location sensor '{self.name}' failed; rendering state unavailable")
             return False
         return True
@@ -207,11 +209,14 @@ class DeviceMapsLinkSensor(SensorEntity):
         self.device = device['data']
         self.device_id = device_id
         self._attr_device_info = device['ha_dev_info']
+        self.async_update = coordinator.async_add_listener(self.async_write_ha_state)
 
     @property
     def available(self) -> bool:
         tag_data = self.coordinator.data.get(self.device_id, {})
-        return bool(tag_data) and bool(tag_data.get('update_success'))
+        return bool(tag_data) and bool(
+            tag_data.get('update_success') or tag_data.get('location_found')
+        )
 
     @property
     def native_value(self):

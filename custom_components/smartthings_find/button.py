@@ -57,6 +57,9 @@ class UpdateLocationButton(ButtonEntity):
         dev_name = self.device.get("name") or self.device.get("device_id")
         device_id = self.device.get("device_id")
         session = self.hass.data[DOMAIN][self.entry_id]["session"]
+        previous_request_ids = {
+            id(request) for request in self.device.get('_fmm_request_history', [])
+        }
 
         if not self.device.get("web_dvce_id"):
             raise HomeAssistantError(
@@ -66,7 +69,29 @@ class UpdateLocationButton(ButtonEntity):
         tag_data = await get_fmm_device_location(
             self.hass, session, self.device, self.entry_id, force_active=True
         )
-        attempt_succeeded = bool(tag_data.get('update_success')) and bool(tag_data.get('location_found'))
+        request_history = tag_data.get('fmm_request_history') or []
+        new_api_calls = sum(
+            1 for request in request_history
+            if id(request) not in previous_request_ids and request.get('api_call')
+        )
+        self.device['_fmm_api_calls_total'] = (
+            self.device.get('_fmm_api_calls_total', 0) + new_api_calls
+        )
+        tag_data['fmm_api_calls_last_update'] = new_api_calls
+        tag_data['fmm_api_calls_total'] = self.device['_fmm_api_calls_total']
+        previous_data = (self.coordinator.data or {}).get(device_id, {}) or {}
+        previous_loc = previous_data.get('used_loc') or {}
+        result_loc = tag_data.get('used_loc') or {}
+        previous_time = previous_loc.get('gps_date')
+        result_time = result_loc.get('gps_date')
+        # Reaching Samsung successfully is not evidence that this press produced a
+        # fresh fix: LOCATION=501 commonly returns coordinates from an older report.
+        attempt_succeeded = bool(
+            tag_data.get('update_success')
+            and tag_data.get('location_found')
+            and result_time
+            and (not previous_time or result_time > previous_time)
+        )
 
         if tag_data.get('update_success'):
             self.device['_consecutive_fetch_failures'] = 0
