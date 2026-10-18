@@ -60,6 +60,9 @@ SIGHTING = {"oprnType": "OFFLINE_LOC", "latitude": "45.1", "longitude": "9.2", "
             "extra": {"gpsUtcDt": "20260920101010"}}        # no vertical uncertainty: used to raise
 device = {"device_id": "d1", "name": "Watch", "web_dvce_id": "123", "web_usr_id": "u"}
 hass = MagicMock()
+# Home Assistant's data store is a dict. Leaving it as a MagicMock makes `.get()` return a
+# truthy mock, which looks like a cached web session and incorrectly triggers a second read.
+hass.data = {}
 
 
 async def read(*responses, target=device):
