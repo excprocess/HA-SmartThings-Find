@@ -9,6 +9,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
+from .binary_sensor import DeviceStalePositionSensor
 from .utils import google_maps_url
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 DeviceLocationSensor(hass, coordinator, device),
                 DeviceMapsLinkSensor(hass, coordinator, device),
             ]
+        if device['data'].get("is_fmm"):
+            entities += [DeviceLocationRetrievalStatusSensor(coordinator, device)]
     async_add_entities(entities)
 
 
@@ -230,3 +233,38 @@ class DeviceMapsLinkSensor(SensorEntity):
         if url and len(url) > 255:
             return None
         return url
+
+
+class DeviceLocationRetrievalStatusSensor(SensorEntity):
+    """Text status showing OK or the retrieval problem and its code."""
+
+    _attr_icon = "mdi:map-marker-alert"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, device):
+        self.coordinator = coordinator
+        device_id = device['data'].get("device_id")
+        name = device['data'].get("name") or device_id or "SmartThings Find"
+        self._attr_unique_id = f"stf_location_retrieval_status_{device_id}"
+        self._attr_name = f"{name} Location Retrieval Status"
+        self.device_id = device_id
+        self._attr_device_info = device['ha_dev_info']
+        self.async_update = coordinator.async_add_listener(self.async_write_ha_state)
+
+    @property
+    def native_value(self):
+        tag_data = self.coordinator.data.get(self.device_id, {}) or {}
+        error = DeviceStalePositionSensor._error_message(tag_data)
+        if not error:
+            return "OK"
+
+        history = tag_data.get('fmm_request_history') or []
+        error_code = DeviceStalePositionSensor._request_diagnostics(history).get('error_code')
+        detail = error_code or error
+        return f"Problem ({detail})"[:255]
+
+    @property
+    def extra_state_attributes(self):
+        tag_data = self.coordinator.data.get(self.device_id, {}) or {}
+        error = DeviceStalePositionSensor._error_message(tag_data)
+        return {'error': error} if error else {}

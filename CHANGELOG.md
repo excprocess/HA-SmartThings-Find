@@ -7,6 +7,7 @@
 
 ### Added
 - The Location Retrieval Error entity exposes the latest API endpoint, HTTP status, Samsung result code, and a concise `error_code` attribute alongside its `ok` / `problem` state.
+- Added a text diagnostic sensor whose state reads `OK` or `Problem (<error code>)`, since Home Assistant binary sensors cannot show custom text states.
 
 ## 8.1.9
 
