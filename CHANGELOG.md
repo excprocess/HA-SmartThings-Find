@@ -1,5 +1,12 @@
 # Changelog
 
+## 8.1.8
+
+### Changed
+- Full sanitized FMM request diagnostics are written to the Home Assistant log; the Location Retrieval Error entity keeps only the latest interaction and the consecutive fetch-failure counter.
+- `is_buds` remains available internally for Buds-specific behavior but is no longer exposed as a device-tracker attribute.
+- `last_seen_local` and `next_update_local` on the tracker and location sensor now use ISO 8601 timestamps in the Home Assistant timezone. Added `last_location_retrieved_at` to distinguish when Home Assistant last read coordinates from Samsung's GPS fix time and compare it with the entity's native `last_updated`.
+
 ## 8.1.7
 
 ### Changed

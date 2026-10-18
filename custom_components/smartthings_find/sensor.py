@@ -150,11 +150,16 @@ class DeviceLocationSensor(SensorEntity):
             'gps_accuracy': used_loc.get('gps_accuracy'),
             'last_seen': last_seen,
             'last_seen_local': (
-                last_seen_local.strftime("%Y-%m-%d %H:%M:%S %Z %z")
+                last_seen_local.isoformat(timespec="seconds")
                 if last_seen_local else None
             ),
+            'last_location_retrieved_at': (
+                dt_util.as_local(tag_data['last_location_retrieved_at']).isoformat(timespec="seconds")
+                if isinstance(tag_data.get('last_location_retrieved_at'), datetime)
+                else None
+            ),
             'next_update_local': (
-                next_update_local.strftime("%Y-%m-%d %H:%M:%S %Z %z")
+                next_update_local.isoformat(timespec="seconds")
                 if next_update_local else None
             ),
             'next_update_mode': tag_data.get('next_update_mode'),

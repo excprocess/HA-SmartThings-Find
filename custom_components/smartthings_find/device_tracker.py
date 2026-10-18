@@ -126,6 +126,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity):
             "dev_name",
             "icon_url",
             "is_tracker",
+            "is_buds",
             "is_fmm",
             "original_name",
             "device_id",
@@ -144,6 +145,8 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity):
             "gps_accuracy",
             "gps_date",
             "last_seen",
+            "last_seen_local",
+            "last_location_retrieved_at",
             "google_maps_url",
             "in_zone",
             "polling_interval",
@@ -156,6 +159,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity):
             "consecutive_fetch_failures",
             "next_update_at",
             "fmm_request_history",
+            "fmm_last_interaction",
             "next_poll",
         }
         attrs = {
@@ -176,8 +180,19 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity):
             dt_util.as_local(last_seen) if isinstance(last_seen, datetime) else None
         )
         attrs["last_seen_local"] = (
-            last_seen_local.strftime("%Y-%m-%d %H:%M:%S %Z %z")
+            last_seen_local.isoformat(timespec="seconds")
             if last_seen_local
+            else None
+        )
+        retrieved_at = tag_data.get("last_location_retrieved_at")
+        retrieved_at_local = (
+            dt_util.as_local(retrieved_at)
+            if isinstance(retrieved_at, datetime)
+            else None
+        )
+        attrs["last_location_retrieved_at"] = (
+            retrieved_at_local.isoformat(timespec="seconds")
+            if retrieved_at_local
             else None
         )
         next_update_at = tag_data.get("next_update_at")

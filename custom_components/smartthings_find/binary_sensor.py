@@ -121,6 +121,7 @@ class DeviceStalePositionSensor(CoordinatorEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self):
         tag_data = self._tag_data()
+        request_history = tag_data.get('fmm_request_history') or []
         return {
             'position_stale': bool(tag_data.get('position_stale')),
             'active_location_supported': tag_data.get('active_location_supported'),
@@ -129,5 +130,8 @@ class DeviceStalePositionSensor(CoordinatorEntity, BinarySensorEntity):
             'active_location_error': tag_data.get('active_location_error'),
             'position_error': tag_data.get('position_error'),
             'consecutive_fetch_failures': tag_data.get('consecutive_fetch_failures', 0),
-            'fmm_request_history': tag_data.get('fmm_request_history', []),
+            'fmm_last_interaction': (
+                request_history[-1] if request_history
+                else tag_data.get('fmm_last_interaction')
+            ),
         }

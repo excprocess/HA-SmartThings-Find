@@ -254,7 +254,19 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                         "[%s] Not due for another %ss", dev_name,
                         round(dev_data.get('_next_poll', now) - now))
                     continue
+                history = dev_data.get('_fmm_request_history', [])
+                previous_request_ids = {id(request) for request in history}
                 tag_data = await get_device_location(self.hass, self.session, dev_data, self.entry_id)
+                request_history = tag_data.get('fmm_request_history') or []
+                for request in request_history:
+                    if id(request) not in previous_request_ids:
+                        _LOGGER.info("[%s] FMM request: %s", dev_name, request)
+                if request_history:
+                    tag_data['fmm_last_interaction'] = request_history[-1]
+                if tag_data.get('location_found'):
+                    # This is when Home Assistant successfully read coordinates, distinct
+                    # from the GPS fix timestamp supplied by Samsung.
+                    tag_data['last_location_retrieved_at'] = datetime.now(timezone.utc)
                 fetch_ok = bool(tag_data.get('update_success'))
                 if fetch_ok:
                     dev_data['_consecutive_fetch_failures'] = 0
