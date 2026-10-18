@@ -118,11 +118,88 @@ class DeviceStalePositionSensor(CoordinatorEntity, BinarySensorEntity):
             or tag_data.get('position_error')
         )
 
+    @staticmethod
+    def _request_diagnostics(request_history: list) -> dict:
+        """Extract the latest API response and a useful non-success code."""
+        # A bounded history can contain several polling cycles. Restrict the
+        # diagnostic code to the newest interaction so an old failure does not
+        # remain visible after a later successful read.
+        cycle_start = next(
+            (index for index in range(len(request_history) - 1, -1, -1)
+             if request_history[index].get('endpoint') == 'active_location'),
+            0,
+        )
+        cycle_history = request_history[cycle_start:]
+        last_api = next(
+            (record for record in reversed(cycle_history) if record.get('api_call')),
+            {},
+        )
+        endpoint = last_api.get('endpoint')
+        outcome = last_api.get('outcome')
+        status = last_api.get('http_status')
+        try:
+            http_status = int(status) if status is not None else None
+        except (TypeError, ValueError):
+            http_status = None
+
+        error_code = None
+        error_source = endpoint
+        if http_status is not None and http_status >= 400:
+            error_code = f"HTTP {http_status}"
+        else:
+            operations = last_api.get('returned_operations') or []
+            location_operation = next(
+                (operation for operation in reversed(operations)
+                 if operation.get('type') == 'LOCATION'),
+                None,
+            )
+            result_code = (
+                location_operation.get('result_code') if location_operation else None
+            ) or last_api.get('result_code')
+            if result_code is not None and str(result_code) not in {'00', '1200'} and not (
+                str(result_code) == '200' and outcome == 'pending'
+            ):
+                error_code = str(result_code)
+            elif outcome in {'timeout', 'http_error', 'rejected'}:
+                error_code = outcome
+            else:
+                # Poll-result records are semantic summaries rather than requests; use
+                # their LOCATION code when it explains an active/retrieval error.
+                for record in reversed(cycle_history):
+                    if record.get('endpoint') != 'location_result':
+                        continue
+                    entries = record.get('location_entries') or []
+                    location_entry = next(
+                        (operation for operation in reversed(entries)
+                         if operation.get('type') == 'LOCATION'),
+                        None,
+                    )
+                    result_code = location_entry.get('result_code') if location_entry else None
+                    if result_code is not None and str(result_code) not in {'00', '1200'}:
+                        error_code = str(result_code)
+                        error_source = 'location_result'
+                    break
+
+        error_endpoint = error_source if error_code else None
+        error_http_status = http_status if error_code else None
+        error_outcome = outcome if error_code else None
+
+        return {
+            'error_code': error_code,
+            'error_endpoint': error_endpoint,
+            'error_http_status': error_http_status,
+            'error_outcome': error_outcome,
+            'last_api_endpoint': last_api.get('endpoint'),
+            'last_api_http_status': last_api.get('http_status'),
+            'last_api_result_code': last_api.get('result_code'),
+            'last_api_outcome': last_api.get('outcome'),
+        }
+
     @property
     def extra_state_attributes(self):
         tag_data = self._tag_data()
         request_history = tag_data.get('fmm_request_history') or []
-        return {
+        attrs = {
             'position_stale': bool(tag_data.get('position_stale')),
             'active_location_supported': tag_data.get('active_location_supported'),
             'error': self._error_message(tag_data),
@@ -135,3 +212,5 @@ class DeviceStalePositionSensor(CoordinatorEntity, BinarySensorEntity):
                 else tag_data.get('fmm_last_interaction')
             ),
         }
+        attrs.update(self._request_diagnostics(request_history))
+        return attrs

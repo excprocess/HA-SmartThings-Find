@@ -7,6 +7,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.const import Platform
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.config_entries import ConfigEntry
 
@@ -104,8 +105,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 0 (the default) = no separate in-zone interval: everything uses the general one.
     in_zone_interval = entry.options.get(
         CONF_UPDATE_INTERVAL_IN_ZONE, CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT) or update_interval
+    position_store = Store(hass, 1, f"{DOMAIN}_{entry.entry_id}_positions")
+    try:
+        saved_positions = await position_store.async_load() or {}
+    except Exception:
+        _LOGGER.warning("Unable to load saved SmartThings Find positions", exc_info=True)
+        saved_positions = {}
+    if not isinstance(saved_positions, dict):
+        saved_positions = {}
+
+    now_utc = datetime.now(timezone.utc)
+    restored_data = {}
+    for device in devices:
+        dev_data = device['data']
+        device_id = dev_data.get('device_id')
+        saved = saved_positions.get(device_id)
+        used_loc = saved.get('used_loc') if isinstance(saved, dict) else None
+        if not isinstance(used_loc, dict):
+            continue
+        if used_loc.get('latitude') is None or used_loc.get('longitude') is None:
+            continue
+        gps_date = used_loc.get('gps_date')
+        retrieved_at = saved.get('last_location_retrieved_at')
+        for key, value in (("gps_date", gps_date), ("retrieved_at", retrieved_at)):
+            if isinstance(value, str):
+                try:
+                    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                except ValueError:
+                    parsed = None
+                if key == "gps_date":
+                    gps_date = parsed
+                else:
+                    retrieved_at = parsed
+        if gps_date and gps_date.tzinfo is None:
+            gps_date = gps_date.replace(tzinfo=timezone.utc)
+        if retrieved_at and retrieved_at.tzinfo is None:
+            retrieved_at = retrieved_at.replace(tzinfo=timezone.utc)
+        used_loc = {**used_loc, 'gps_date': gps_date}
+        dev_data['_last_good_loc'] = (None, used_loc)
+        interval = int(dev_data.get('_poll_interval_s') or update_interval)
+        position_stale = not gps_date or (
+            now_utc - gps_date
+        ).total_seconds() > max(interval * 3, 1800)
+        restored_data[device_id] = {
+            'used_loc': used_loc,
+            'location_found': True,
+            'update_success': False,
+            'restored_position': True,
+            'position_stale': position_stale,
+            'last_location_retrieved_at': retrieved_at,
+        }
+    if restored_data:
+        _LOGGER.info("Restored last known positions for %s devices", len(restored_data))
     coordinator = SmartThingsFindCoordinator(
-        hass, session, devices, update_interval, in_zone_interval, entry.entry_id)
+        hass, session, devices, update_interval, in_zone_interval, entry.entry_id,
+        position_store, saved_positions)
+    if restored_data:
+        coordinator.data = restored_data
 
     # This is what makes the whole integration slow to load (around 10-15
     # seconds for my 15 devices) but it is the right way to do it. Only if
@@ -185,13 +241,17 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         devices,
         update_interval: int,
         in_zone_interval: int,
-        entry_id: str
+        entry_id: str,
+        position_store=None,
+        saved_positions: dict | None = None,
     ):
         """Initialize the coordinator."""
         self.session = session
         self.devices = devices
         self.hass = hass
         self.entry_id = entry_id
+        self.position_store = position_store
+        self.saved_positions = saved_positions or {}
         self.away_interval = update_interval
         self.in_zone_interval = in_zone_interval or update_interval
         super().__init__(
@@ -355,6 +415,34 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                         self.entry_id,
                         dev_data.get('st_device_id') or dev_data['device_id'],
                     )
+            updated_positions = dict(self.saved_positions)
+            for device_id, tag_data in tags.items():
+                used_loc = tag_data.get('used_loc') or {}
+                if not (
+                    tag_data.get('update_success')
+                    and tag_data.get('location_found')
+                    and used_loc.get('latitude') is not None
+                    and used_loc.get('longitude') is not None
+                ):
+                    continue
+                gps_date = used_loc.get('gps_date')
+                retrieved_at = tag_data.get('last_location_retrieved_at')
+                updated_positions[device_id] = {
+                    'used_loc': {
+                        **used_loc,
+                        'gps_date': gps_date.isoformat() if gps_date else None,
+                    },
+                    'last_location_retrieved_at': (
+                        retrieved_at.isoformat() if retrieved_at else None
+                    ),
+                }
+            if self.position_store and updated_positions != self.saved_positions:
+                try:
+                    await self.position_store.async_save(updated_positions)
+                except Exception:
+                    _LOGGER.warning("Unable to save SmartThings Find positions", exc_info=True)
+                else:
+                    self.saved_positions = updated_positions
             _LOGGER.debug("Fetched %s locations", len(tags))
             return tags
         except ConfigEntryAuthFailed:

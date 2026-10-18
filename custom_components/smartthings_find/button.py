@@ -126,6 +126,32 @@ class UpdateLocationButton(ButtonEntity):
         new_data = dict(self.coordinator.data or {})
         new_data[device_id] = tag_data
         self.coordinator.async_set_updated_data(new_data)
+        used_loc = tag_data.get('used_loc') or {}
+        if (
+            self.coordinator.position_store
+            and tag_data.get('update_success')
+            and tag_data.get('location_found')
+            and used_loc.get('latitude') is not None
+            and used_loc.get('longitude') is not None
+        ):
+            gps_date = used_loc.get('gps_date')
+            retrieved_at = tag_data.get('last_location_retrieved_at')
+            saved_positions = dict(self.coordinator.saved_positions)
+            saved_positions[device_id] = {
+                'used_loc': {
+                    **used_loc,
+                    'gps_date': gps_date.isoformat() if gps_date else None,
+                },
+                'last_location_retrieved_at': (
+                    retrieved_at.isoformat() if retrieved_at else None
+                ),
+            }
+            try:
+                await self.coordinator.position_store.async_save(saved_positions)
+            except Exception:
+                _LOGGER.warning("Unable to save refreshed location for %s", dev_name, exc_info=True)
+            else:
+                self.coordinator.saved_positions = saved_positions
 
         if not attempt_succeeded:
             _LOGGER.warning(

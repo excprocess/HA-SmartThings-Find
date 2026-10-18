@@ -46,6 +46,7 @@ def load():
         _stub("homeassistant." + name, **{k: MagicMock() for k in (
             "HomeAssistant", "ConfigType", "Platform", "async_get_clientsession", "ConfigEntry", "DeviceInfo",
             "callback", "device_registry", "entity_registry", "async_active_zone")})
+    _stub("homeassistant.helpers.storage", Store=MagicMock())
     _stub("homeassistant.helpers.update_coordinator",
           DataUpdateCoordinator=DataUpdateCoordinator, UpdateFailed=UpdateFailed)
     _stub("homeassistant.exceptions", ConfigEntryAuthFailed=ConfigEntryAuthFailed)

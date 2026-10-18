@@ -1,5 +1,13 @@
 # Changelog
 
+## 8.1.10
+
+### Fixed
+- Last valid coordinates are now persisted across Home Assistant reloads and restarts. If Samsung rejects a new read, the previous position stays visible while the retrieval error is reported.
+
+### Added
+- The Location Retrieval Error entity exposes the latest API endpoint, HTTP status, Samsung result code, and a concise `error_code` attribute alongside its `ok` / `problem` state.
+
 ## 8.1.9
 
 ### Changed
