@@ -154,12 +154,23 @@ class UpdateLocationButton(ButtonEntity):
                 self.coordinator.saved_positions = saved_positions
 
         if not attempt_succeeded:
+            last_position = (
+                result_time.isoformat(timespec="seconds")
+                if result_time else "unknown"
+            )
+            reason = (
+                tag_data.get('fetch_error')
+                or tag_data.get('active_location_error')
+                or tag_data.get('position_error')
+            )
+            detail = f" Samsung reported: {reason}." if reason else ""
             _LOGGER.warning(
-                "Active location request for %s was rejected, timed out, or the fetch "
-                "itself failed; showing the last known position instead", dev_name,
+                "No newer location was confirmed for %s (latest fix: %s).%s "
+                "Keeping the last known position.",
+                dev_name, last_position, detail,
             )
             raise HomeAssistantError(
-                f"Samsung didn't confirm a fresh fix for '{dev_name}' in time - "
-                "showing the last known position instead"
+                f"No newer location was received for '{dev_name}'. The latest fix is "
+                f"{last_position}.{detail} The last known position remains available."
             )
         _LOGGER.info("Successfully forced a fresh location fix for %s", dev_name)

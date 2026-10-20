@@ -28,10 +28,11 @@
   "options": {
     "step": {
       "init": {
-        "description": "Jedes Gerät wird nach seinem eigenen Zeitplan abgefragt. Geräte innerhalb einer Home-Assistant-Zone (z. B. Zuhause) nutzen das Intervall für Zonen, alle anderen das allgemeine. Aktive Standortabfragen werden pro Gerät über den Schalter \"Active Location\" eingestellt.",
+        "description": "Telefone verwenden das Zonenintervall oder das allgemeine Intervall. Buds, PCs und Uhren verwenden ein separates Intervall, wenn ihr gerätespezifischer Schalter Active Location eingeschaltet ist. Ist der Schalter ausgeschaltet, werden sie passiv nach Zonen- oder allgemeinem Intervall abgefragt.",
         "data": {
           "update_interval": "Aktualisierungsintervall (Sekunden), für Geräte außerhalb jeder Zone",
-          "update_interval_in_zone": "Aktualisierungsintervall innerhalb einer Zone (Sekunden, 0 = wie das allgemeine)"
+          "update_interval_in_zone": "Aktualisierungsintervall innerhalb einer Zone (Sekunden, 0 = wie das allgemeine)",
+          "active_passive_device_interval": "Aktives Aktualisierungsintervall für Buds, PCs und Uhren (Sekunden; ein Intervall innerhalb und außerhalb von Zonen)"
         }
       }
     }

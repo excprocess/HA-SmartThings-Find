@@ -1776,13 +1776,6 @@ async def get_devices(hass: HomeAssistant, session: aiohttp.ClientSession, entry
     except Exception as e:
         _LOGGER.debug("[diag] Web metadata enrichment raised at top level: %s", e, exc_info=True)
 
-    # Buds often need the Find network to report their last known location. Give each
-    # Buds device exactly one active LOCATION attempt on startup, then let normal
-    # scheduled reads remain passive unless its Active Location switch is enabled.
-    for device in all_devices:
-        if device.get("is_buds"):
-            device["_startup_active_location_pending"] = True
-
     return devices
 
 
@@ -1999,33 +1992,11 @@ async def get_fmm_device_location(
 
     active_location_error = None
     active_location_attempted = False
-    startup_active_location = bool(dev_data.pop("_startup_active_location_pending", False))
-    if dev_data.get('_active_location_unsupported'):
-        # Samsung explicitly rejected LOCATION for this device as unsupported
-        # (resultCode=501 - seen consistently for buds/non-LTE watches, which have no
-        # network connection of their own to push a fix to) at some point this runtime.
-        # No point spending ~7 requests worth of polling on that again every cycle;
-        # retried fresh only after the next restart/reload, in case that ever changes.
-        _record_fmm_request(
-            request_history,
-            "active_location",
-            outcome="skipped",
-            details={"reason": "device_previously_returned_unsupported", "manual_request": force_active},
-        )
-    elif (
-        force_active
-        or startup_active_location
-        or (dev_data.get("active_location_requested") and not dev_data.get('_consecutive_fetch_failures'))
-    ):
-        # active_location_requested is set live by ActiveLocationSwitch (switch.py) -
-        # a per-device toggle, replacing the old global "active mode" options that used
-        # to live in the integration's options flow. The automatic (non-force_active)
-        # path is skipped while a failure streak is already in progress
-        # (_consecutive_fetch_failures > 0) - piling an extra ~7 requests worth of
-        # active-push polling onto a session that's already failing (likely rate-limited)
-        # only makes things worse; let the passive read's own retry-with-fresh-bootstrap
-        # do its job first. A manual button press (force_active=True) always goes through
-        # regardless, since that's an explicit one-off request from the user.
+    if force_active or dev_data.get("active_location_requested"):
+        # active_location_requested is set live by ActiveLocationSwitch (switch.py).
+        # An enabled switch opts this device into active retrieval on every poll,
+        # including Buds and watches; prior 501 responses and transient failures do not
+        # suppress later retries.
         active_location_attempted = True
         active_success, active_reason = await perform_fmm_operation(
             hass,
@@ -2036,13 +2007,10 @@ async def get_fmm_device_location(
             poll_seconds=FMM_LOCATION_POLL_SECONDS,
             request_history=request_history,
         )
-        if startup_active_location:
-            _record_fmm_request(
-                request_history,
-                "active_location_startup",
-                outcome="completed" if active_success else "failed",
-                details={"result_code": active_reason},
-            )
+        if active_success:
+            # A deliberate manual retry can prove that an operation previously
+            # marked unsupported is now accepted again by Samsung.
+            dev_data.pop('_active_location_unsupported', None)
         active_location_error = None if active_success else (
             f"Samsung active location request failed (resultCode={active_reason})"
             if active_reason else "Samsung did not complete the active location request (timeout or no response)"
@@ -2050,19 +2018,15 @@ async def get_fmm_device_location(
         if not active_success and active_reason == "501":
             dev_data['_active_location_unsupported'] = True
             _LOGGER.info(
-                "[%s] Samsung reports active location is not supported for this device - "
-                "won't keep retrying it until the next restart",
+                "[%s] Samsung rejected this active location request as unsupported; "
+                "the next opted-in poll will retry",
                 dev_name,
             )
         # Whether or not it succeeded/timed out, fall through to the normal passive read
         # below - extract_best_location() picks the newest fix regardless of how the
         # freshest one got there, and a passive read still returns the best data we have.
     else:
-        skip_reason = (
-            "consecutive_fetch_failures"
-            if dev_data.get("_consecutive_fetch_failures")
-            else "active_location_switch_off"
-        )
+        skip_reason = "active_location_switch_off"
         _record_fmm_request(
             request_history,
             "active_location",
@@ -2264,6 +2228,18 @@ async def get_fmm_device_location(
                     outcome="refresh_read_failed",
                     details={"active_request_sent": False},
                 )
+
+        # Samsung can return a valid but older LOCATION entry even when a newer
+        # fix was already read in a previous cycle. Keep that response in the
+        # request diagnostics, but never let it replace the last known good fix.
+        if (
+            used_loc
+            and previous_good
+            and previous_gps_date
+            and current_gps_date
+            and current_gps_date <= previous_gps_date
+        ):
+            used_op, used_loc = previous_good
 
         position_error = None
         if not used_loc:

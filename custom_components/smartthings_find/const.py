@@ -18,6 +18,9 @@ CONF_UPDATE_INTERVAL = "update_interval"
 CONF_UPDATE_INTERVAL_DEFAULT = 120
 CONF_UPDATE_INTERVAL_IN_ZONE = "update_interval_in_zone"
 CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT = 0
+CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL = "active_passive_device_interval"
+# Single cadence for enabled active polling on network-dependent FMM devices.
+CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT = 1800
 MIN_UPDATE_INTERVAL = 30
 
 # Keep location fixes even when this uncertain, but flag them for the user.

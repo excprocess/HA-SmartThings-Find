@@ -28,6 +28,9 @@ from .const import (
     CONF_UPDATE_INTERVAL_DEFAULT,
     CONF_UPDATE_INTERVAL_IN_ZONE,
     CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT,
+    CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL,
+    CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
+    MIN_UPDATE_INTERVAL,
     MAX_STALE_FALLBACK_CYCLES,
 )
 from .utils import (
@@ -105,6 +108,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 0 (the default) = no separate in-zone interval: everything uses the general one.
     in_zone_interval = entry.options.get(
         CONF_UPDATE_INTERVAL_IN_ZONE, CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT) or update_interval
+    active_passive_device_interval = entry.options.get(
+        CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL,
+        CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
+    )
     position_store = Store(hass, 1, f"{DOMAIN}_{entry.entry_id}_positions")
     try:
         saved_positions = await position_store.async_load() or {}
@@ -159,7 +166,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Restored last known positions for %s devices", len(restored_data))
     coordinator = SmartThingsFindCoordinator(
         hass, session, devices, update_interval, in_zone_interval, entry.entry_id,
-        position_store, saved_positions)
+        position_store, saved_positions,
+        active_passive_device_interval=active_passive_device_interval)
     if restored_data:
         coordinator.data = restored_data
 
@@ -244,6 +252,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         entry_id: str,
         position_store=None,
         saved_positions: dict | None = None,
+        active_passive_device_interval: int = CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
     ):
         """Initialize the coordinator."""
         self.session = session
@@ -254,12 +263,45 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         self.saved_positions = saved_positions or {}
         self.away_interval = update_interval
         self.in_zone_interval = in_zone_interval or update_interval
+        self.active_passive_device_interval = max(
+            MIN_UPDATE_INTERVAL, int(active_passive_device_interval)
+        )
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=min(self.away_interval, self.in_zone_interval))
+            update_interval=timedelta(
+                seconds=min(
+                    self.away_interval,
+                    self.in_zone_interval,
+                    self.active_passive_device_interval,
+                )
+            )
         )
+
+    @staticmethod
+    def _uses_active_passive_device_interval(dev_data: dict) -> bool:
+        """Return whether this is a Buds, PC, or Watch FMM device."""
+        if not dev_data.get('is_fmm'):
+            return False
+        device_type = str(dev_data.get('web_device_type_code') or '').upper()
+        return bool(
+            dev_data.get('is_buds')
+            or 'BUD' in device_type
+            or 'WATCH' in device_type
+            or device_type in {'PC', 'PC DEVICE', 'WINDOWS_PC', 'PERSONAL_COMPUTER'}
+            or 'COMPUTER' in device_type
+            or 'LAPTOP' in device_type
+        )
+
+    def _device_poll_interval(self, dev_data: dict, in_zone: bool) -> int:
+        """Use one dedicated cadence for active Buds/PC/Watch polling."""
+        if (
+            dev_data.get('active_location_requested')
+            and self._uses_active_passive_device_interval(dev_data)
+        ):
+            return self.active_passive_device_interval
+        return self.in_zone_interval if in_zone else self.away_interval
 
     def schedule_device(self, dev_data: dict, tag_data: dict, now: float) -> None:
         """Work out when a device is due next, from where it is now.
@@ -269,7 +311,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         """
         in_zone = bool(tag_data.get('location_found')) and is_in_active_zone(
             self.hass, tag_data.get('used_loc'))
-        interval = self.in_zone_interval if in_zone else self.away_interval
+        interval = self._device_poll_interval(dev_data, in_zone)
         dev_data['_poll_interval_s'] = interval
         dev_data['_next_poll'] = now + interval
         seconds_until_next_poll = max(0, dev_data['_next_poll'] - time.monotonic())
@@ -281,7 +323,6 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
             if dev_data.get('is_fmm')
             and dev_data.get('active_location_requested')
             and dev_data.get('web_dvce_id')
-            and not dev_data.get('_active_location_unsupported')
             and not dev_data.get('_consecutive_fetch_failures')
             else 'passive'
         )
@@ -361,20 +402,40 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                         rate_limit_failures = dev_data.get('_rate_limit_failures', 0) + 1
                         dev_data['_rate_limit_failures'] = rate_limit_failures
                         retry_after = min(3600, 300 * (2 ** min(rate_limit_failures - 1, 4)))
+                        if (
+                            dev_data.get('active_location_requested')
+                            and self._uses_active_passive_device_interval(dev_data)
+                        ):
+                            retry_after = max(
+                                retry_after, self.active_passive_device_interval
+                            )
                         dev_data['_next_poll'] = now + retry_after
                         _LOGGER.warning(
                             "[%s] Samsung rate limited location retrieval; backing off for %ss",
                             dev_name, retry_after,
                         )
                     else:
-                        dev_data['_next_poll'] = 0
-                        retry_after = min(self.away_interval, self.in_zone_interval)
+                        if (
+                            dev_data.get('active_location_requested')
+                            and self._uses_active_passive_device_interval(dev_data)
+                        ):
+                            retry_after = self.active_passive_device_interval
+                            dev_data['_next_poll'] = now + retry_after
+                        else:
+                            dev_data['_next_poll'] = 0
+                            retry_after = min(self.away_interval, self.in_zone_interval)
                     prev_tag_data = previous.get(dev_data['device_id'])
                     failed_tag_data = tag_data
                     failed_tag_data['next_update_at'] = datetime.now(timezone.utc) + timedelta(
                         seconds=retry_after
                     )
-                    failed_tag_data['next_update_mode'] = 'passive'
+                    failed_tag_data['next_update_mode'] = (
+                        'active'
+                        if dev_data.get('is_fmm')
+                        and dev_data.get('active_location_requested')
+                        and dev_data.get('web_dvce_id')
+                        else 'passive'
+                    )
                     if (
                         failures <= MAX_STALE_FALLBACK_CYCLES
                         and prev_tag_data

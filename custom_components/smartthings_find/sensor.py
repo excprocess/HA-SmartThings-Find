@@ -4,12 +4,12 @@ from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import EntityCategory
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .binary_sensor import DeviceStalePositionSensor
 from .utils import google_maps_url
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,6 +18,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     """Set up SmartThings Find sensor entities."""
     devices = hass.data[DOMAIN][entry.entry_id]["devices"]
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    # Migrate the former binary Location Retrieval Error and remove the separate
+    # text Status entity introduced in 8.1.10. The replacement text entity keeps the
+    # error entity's unique ID, but now belongs to the sensor domain so its state can
+    # display an HTTP/Samsung code directly.
+    from homeassistant.helpers import entity_registry as er
+    registry = er.async_get(hass)
     entities = []
     for device in devices:
         # Non-tracker (FMM: phone/wearable) battery only ever reflects whatever the
@@ -38,15 +44,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 DeviceMapsLinkSensor(hass, coordinator, device),
             ]
         if device['data'].get("is_fmm"):
-            entities += [DeviceLocationRetrievalStatusSensor(coordinator, device)]
+            device_id = device['data'].get('device_id')
+            for old_domain, old_unique_id in (
+                ("binary_sensor", f"stf_stale_position_{device_id}"),
+                ("sensor", f"stf_location_retrieval_status_{device_id}"),
+            ):
+                old_entity_id = registry.async_get_entity_id(
+                    old_domain, DOMAIN, old_unique_id
+                )
+                if old_entity_id:
+                    registry.async_remove(old_entity_id)
+            entities += [DeviceLocationRetrievalErrorSensor(coordinator, device)]
     async_add_entities(entities)
 
 
-class DeviceBatterySensor(SensorEntity):
+class DeviceBatterySensor(CoordinatorEntity, SensorEntity):
     """Representation of a Device battery sensor."""
 
     def __init__(self, hass: HomeAssistant, coordinator, device):
         """Initialize the sensor."""
+        super().__init__(coordinator)
         self.coordinator = coordinator
         device_id = device['data'].get("device_id")
         name = device['data'].get("name") or device_id or "SmartThings Find"
@@ -59,7 +76,6 @@ class DeviceBatterySensor(SensorEntity):
         self._attr_device_info = device['ha_dev_info']
         self._attr_device_class = SensorDeviceClass.BATTERY
         self._attr_state_class = SensorStateClass.MEASUREMENT
-        self.async_update = coordinator.async_add_listener(self.async_write_ha_state)
 
     @property
     def available(self) -> bool:
@@ -86,7 +102,7 @@ class DeviceBatterySensor(SensorEntity):
         return data.get('battery_level')
 
 
-class DeviceLocationSensor(SensorEntity):
+class DeviceLocationSensor(CoordinatorEntity, SensorEntity):
     """Exposes the raw coordinates of a device, plus a ready-made Google Maps link.
 
     The device_tracker entity can only ever have a zone as its state ('home',
@@ -97,6 +113,7 @@ class DeviceLocationSensor(SensorEntity):
 
     def __init__(self, hass: HomeAssistant, coordinator, device):
         """Initialize the sensor."""
+        super().__init__(coordinator)
         self.coordinator = coordinator
         device_id = device['data'].get("device_id")
         name = device['data'].get("name") or device_id or "SmartThings Find"
@@ -106,7 +123,6 @@ class DeviceLocationSensor(SensorEntity):
         self.device = device['data']
         self.device_id = device_id
         self._attr_device_info = device['ha_dev_info']
-        self.async_update = coordinator.async_add_listener(self.async_write_ha_state)
 
     def _used_loc(self) -> dict:
         tag_data = self.coordinator.data.get(self.device_id, {}) or {}
@@ -191,7 +207,7 @@ class DeviceLocationSensor(SensorEntity):
         return attrs
 
 
-class DeviceMapsLinkSensor(SensorEntity):
+class DeviceMapsLinkSensor(CoordinatorEntity, SensorEntity):
     """Exposes the Google Maps link as an entity of its own.
 
     Listed under Diagnostic on the device page so the link is one click away
@@ -203,6 +219,7 @@ class DeviceMapsLinkSensor(SensorEntity):
 
     def __init__(self, hass: HomeAssistant, coordinator, device):
         """Initialize the sensor."""
+        super().__init__(coordinator)
         self.coordinator = coordinator
         device_id = device['data'].get("device_id")
         name = device['data'].get("name") or device_id or "SmartThings Find"
@@ -212,7 +229,6 @@ class DeviceMapsLinkSensor(SensorEntity):
         self.device = device['data']
         self.device_id = device_id
         self._attr_device_info = device['ha_dev_info']
-        self.async_update = coordinator.async_add_listener(self.async_write_ha_state)
 
     @property
     def available(self) -> bool:
@@ -235,36 +251,134 @@ class DeviceMapsLinkSensor(SensorEntity):
         return url
 
 
-class DeviceLocationRetrievalStatusSensor(SensorEntity):
-    """Text status showing OK or the retrieval problem and its code."""
+class DeviceLocationRetrievalErrorSensor(CoordinatorEntity, SensorEntity):
+    """Expose OK or the current location error code as a readable state."""
 
     _attr_icon = "mdi:map-marker-alert"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, device):
+        super().__init__(coordinator)
         self.coordinator = coordinator
         device_id = device['data'].get("device_id")
         name = device['data'].get("name") or device_id or "SmartThings Find"
-        self._attr_unique_id = f"stf_location_retrieval_status_{device_id}"
-        self._attr_name = f"{name} Location Retrieval Status"
+        self._attr_unique_id = f"stf_stale_position_{device_id}"
+        self._attr_name = f"{name} Location Retrieval Error"
         self.device_id = device_id
         self._attr_device_info = device['ha_dev_info']
-        self.async_update = coordinator.async_add_listener(self.async_write_ha_state)
+
+    @staticmethod
+    def _error_message(tag_data: dict) -> str | None:
+        return (
+            tag_data.get('fetch_error')
+            or tag_data.get('active_location_error')
+            or tag_data.get('position_error')
+        )
+
+    @staticmethod
+    def _request_diagnostics(request_history: list) -> dict:
+        """Extract the latest API response and a useful non-success code."""
+        cycle_start = next(
+            (index for index in range(len(request_history) - 1, -1, -1)
+             if request_history[index].get('endpoint') == 'active_location'),
+            0,
+        )
+        cycle_history = request_history[cycle_start:]
+        last_api = next(
+            (record for record in reversed(cycle_history) if record.get('api_call')),
+            {},
+        )
+        endpoint = last_api.get('endpoint')
+        outcome = last_api.get('outcome')
+        status = last_api.get('http_status')
+        try:
+            http_status = int(status) if status is not None else None
+        except (TypeError, ValueError):
+            http_status = None
+
+        error_code = None
+        error_source = endpoint
+        if http_status is not None and http_status >= 400:
+            error_code = f"HTTP {http_status}"
+        else:
+            operations = last_api.get('returned_operations') or []
+            location_operation = next(
+                (operation for operation in reversed(operations)
+                 if operation.get('type') == 'LOCATION'),
+                None,
+            )
+            result_code = (
+                location_operation.get('result_code') if location_operation else None
+            ) or last_api.get('result_code')
+            if result_code is not None and str(result_code) not in {'00', '1200'} and not (
+                str(result_code) == '200' and outcome == 'pending'
+            ):
+                error_code = str(result_code)
+            elif outcome in {'timeout', 'http_error', 'rejected'}:
+                error_code = outcome
+            else:
+                for record in reversed(cycle_history):
+                    if record.get('endpoint') != 'location_result':
+                        continue
+                    entries = record.get('location_entries') or []
+                    location_entry = next(
+                        (operation for operation in reversed(entries)
+                         if operation.get('type') == 'LOCATION'),
+                        None,
+                    )
+                    result_code = location_entry.get('result_code') if location_entry else None
+                    if result_code is not None and str(result_code) not in {'00', '1200'}:
+                        error_code = str(result_code)
+                        error_source = 'location_result'
+                    break
+
+        return {
+            'error_code': error_code,
+            'error_endpoint': error_source if error_code else None,
+            'error_http_status': http_status if error_code else None,
+            'error_outcome': outcome if error_code else None,
+            'last_api_endpoint': last_api.get('endpoint'),
+            'last_api_http_status': last_api.get('http_status'),
+            'last_api_result_code': last_api.get('result_code'),
+            'last_api_outcome': last_api.get('outcome'),
+        }
 
     @property
     def native_value(self):
         tag_data = self.coordinator.data.get(self.device_id, {}) or {}
-        error = DeviceStalePositionSensor._error_message(tag_data)
+        error = self._error_message(tag_data)
         if not error:
             return "OK"
 
         history = tag_data.get('fmm_request_history') or []
-        error_code = DeviceStalePositionSensor._request_diagnostics(history).get('error_code')
-        detail = error_code or error
-        return f"Problem ({detail})"[:255]
+        error_code = self._request_diagnostics(history).get('error_code')
+        return str(error_code or error)[:255]
 
     @property
     def extra_state_attributes(self):
         tag_data = self.coordinator.data.get(self.device_id, {}) or {}
-        error = DeviceStalePositionSensor._error_message(tag_data)
-        return {'error': error} if error else {}
+        error = self._error_message(tag_data)
+        attrs = {
+            'error': error,
+            'fetch_error': tag_data.get('fetch_error'),
+            'active_location_error': tag_data.get('active_location_error'),
+            'position_error': tag_data.get('position_error'),
+            'consecutive_fetch_failures': tag_data.get('consecutive_fetch_failures', 0),
+            'position_stale': bool(tag_data.get('position_stale')),
+            'active_location_supported': tag_data.get('active_location_supported'),
+            'fmm_last_interaction': (
+                (tag_data.get('fmm_request_history') or [])[-1]
+                if tag_data.get('fmm_request_history')
+                else tag_data.get('fmm_last_interaction')
+            ),
+        }
+        diagnostics = self._request_diagnostics(tag_data.get('fmm_request_history') or [])
+        if not error:
+            diagnostics.update({
+                'error_code': None,
+                'error_endpoint': None,
+                'error_http_status': None,
+                'error_outcome': None,
+            })
+        attrs.update(diagnostics)
+        return attrs

@@ -20,6 +20,8 @@ from .const import (
     CONF_UPDATE_INTERVAL_DEFAULT,
     CONF_UPDATE_INTERVAL_IN_ZONE,
     CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT,
+    CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL,
+    CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
     MIN_UPDATE_INTERVAL,
     CONF_USER_AUTH_TOKEN,
     CONF_LOGIN_ID
@@ -176,6 +178,13 @@ class SmartThingsFindOptionsFlowHandler(OptionsFlowWithConfigEntry):
                     CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT,
                 )
             )
+            options[CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL] = max(
+                MIN_UPDATE_INTERVAL,
+                int(options.get(
+                    CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL,
+                    CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
+                )),
+            )
             return self.async_create_entry(title="", data=options)
 
         data_schema = vol.Schema(
@@ -192,6 +201,13 @@ class SmartThingsFindOptionsFlowHandler(OptionsFlowWithConfigEntry):
                         CONF_UPDATE_INTERVAL_IN_ZONE, CONF_UPDATE_INTERVAL_IN_ZONE_DEFAULT
                     ),
                 ): vol.All(vol.Coerce(int), vol.Clamp(min=0)),
+                vol.Optional(
+                    CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL,
+                    default=self.options.get(
+                        CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL,
+                        CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Clamp(min=MIN_UPDATE_INTERVAL)),
                 # Active-mode is now a per-device "Active Location" switch (only on FMM
                 # devices - phone/tablet/watch/buds - where it actually has an effect;
                 # SmartTags always reject it, resultCode=01) instead of a single global

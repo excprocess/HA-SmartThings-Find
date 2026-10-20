@@ -1,5 +1,32 @@
 # Changelog
 
+## 8.1.13
+
+### Changed
+- Added a dedicated Active Location refresh interval for Buds, PCs and watches (default 1800 seconds, minimum 30). It is one cadence both inside and outside zones while that device's Active Location switch is on.
+- With Active Location off, these devices make passive reads only and continue to use the existing in-zone/out-of-zone intervals. Phones keep using those two intervals whether active requests are enabled or not.
+- Removed the unconditional startup Active Location attempt for Buds. A restored-on device switch triggers its active request after setup; a switch left off causes only passive reads.
+
+## 8.1.12
+
+### Changed
+- Active Location now runs on every scheduled poll for any Find My Mobile device whose per-device switch is enabled, including Buds and watches. A prior Samsung `501` response or a transient fetch failure no longer suppresses later active attempts; each cycle still performs the passive read afterward.
+- Device trackers now write Home Assistant state only when their own per-device coordinator data is replaced. Polling another device no longer advances their `last_updated` timestamp.
+- Home Assistant's native `last_changed` remains tied to a device tracker state transition (for example, entering or leaving a zone); location/attribute refreshes update `last_updated` instead.
+
+## 8.1.11
+
+### Fixed
+- Location, battery and map-link sensors now subscribe through Home Assistant's coordinator entity lifecycle, so coordinator and manual-button updates refresh their states reliably.
+- Older passive responses remain in diagnostics but can no longer overwrite a newer known-good position.
+- Buds receive at most one automatic active LOCATION attempt at Home Assistant startup; later coordinator polls stay passive even if active location is enabled for that device.
+- A manual Update Location press can retry active LOCATION even after an earlier `501` marked the device unsupported; a successful retry clears that temporary runtime flag.
+- Location Retrieval Error is now a text diagnostic sensor showing `OK`, the Samsung result code (for example `501`), an HTTP status (for example `HTTP 404`), or the readable error. The redundant Location Retrieval Status entity has been removed, and the old binary entity is removed from the registry during setup.
+- Update Location now explains that Samsung supplied no position newer than the last known fix instead of incorrectly labeling every unchanged result as a rejected or timed-out active request.
+
+### Notes
+- The log shows passive reads succeeding at the HTTP level while Buds and Watch often return an unchanged `LOCATION` timestamp. Samsung's reverse-engineered client documents that passive reads return the last available server location; requesting a new fix is a separate operation and support varies by device. These logs do not establish a supported way to force a fresh Buds/Watch fix from the integration.
+
 ## 8.1.10
 
 ### Fixed
@@ -7,7 +34,6 @@
 
 ### Added
 - The Location Retrieval Error entity exposes the latest API endpoint, HTTP status, Samsung result code, and a concise `error_code` attribute alongside its `ok` / `problem` state.
-- Added a text diagnostic sensor whose state reads `OK` or `Problem (<error code>)`, since Home Assistant binary sensors cannot show custom text states.
 
 ## 8.1.9
 

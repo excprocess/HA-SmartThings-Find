@@ -31,6 +31,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
         self.hass = hass
         self.device = device['data']
         self.device_id = self.device.get("device_id")
+        self._last_tag_data = None
 
         name = self.device.get("name") or self.device_id or "SmartThings Find"
         self._attr_unique_id = f"stf_device_tracker_{self.device_id}"
@@ -44,7 +45,6 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
             icon_url = "https://smartthingsfind.samsung.com/img/device_icon/attic_pair.svg"
         if icon_url:
             self._attr_entity_picture = icon_url
-        self.async_update = coordinator.async_add_listener(self.async_write_ha_state)
     
     async def async_added_to_hass(self) -> None:
         """Set the device's Maps link as soon as the device registry entry exists.
@@ -82,6 +82,18 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
                 self.coordinator.data[self.device_id] = data
         if data.get('location_found'):
             update_device_maps_link(self.hass, self.device_id, data.get('used_loc'))
+        self._last_tag_data = self.coordinator.data.get(self.device_id)
+        self.async_on_remove(
+            self.coordinator.async_add_listener(self._handle_coordinator_update)
+        )
+
+    def _handle_coordinator_update(self) -> None:
+        """Write this tracker only when its own coordinator data was replaced."""
+        tag_data = self.coordinator.data.get(self.device_id)
+        if tag_data is self._last_tag_data:
+            return
+        self._last_tag_data = tag_data
+        self.async_write_ha_state()
 
     def async_write_ha_state(self):
         if not self.enabled:

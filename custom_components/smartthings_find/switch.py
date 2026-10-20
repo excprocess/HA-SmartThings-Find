@@ -252,6 +252,11 @@ class ActiveLocationSwitch(SwitchEntity, RestoreEntity):
         last_state = await self.async_get_last_state()
         self._is_on = bool(last_state and last_state.state == "on")
         self.device["active_location_requested"] = self._is_on
+        if self._is_on:
+            # Restore the per-device mode before its next normal schedule. The first
+            # coordinator poll happens before platforms are added, so this is the first
+            # opportunity to honor a switch that was left on across a restart.
+            self.hass.async_create_task(self._request_immediate_poll())
 
     async def async_turn_on(self, **kwargs) -> None:
         self._is_on = True
