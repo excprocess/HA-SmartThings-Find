@@ -100,8 +100,8 @@ async def main():
 
     u.extract_best_location = broken
     r = await read(Response(200, answer(GOOD)))
-    check("even a bug in the parser does not make the device unavailable",
-          (r["update_success"], r["used_loc"]["latitude"]), (True, 41.9116))
+    check("parser errors keep the device available without replacing its newer fix",
+          (r["update_success"], r["used_loc"]["latitude"]), (True, 45.1))
     u.extract_best_location = real
 
     r = await read(Response(200, ["not", "an", "object"]))
