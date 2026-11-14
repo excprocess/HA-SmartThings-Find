@@ -10,7 +10,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .utils import google_maps_url
+from .utils import google_maps_url, is_active_connectable_device
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -42,7 +42,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             entities += [
                 DeviceLocationSensor(hass, coordinator, device),
                 DeviceMapsLinkSensor(hass, coordinator, device),
+                DeviceLastNewFixSensor(hass, coordinator, device),
             ]
+        if is_active_connectable_device(device['data']):
+            # Phones, tablets and PCs only: passive devices (Buds, watches, tags) are
+            # offline whenever they are away from their phone, so this tells nothing there.
+            entities += [DeviceConnectionSensor(hass, coordinator, device)]
         if device['data'].get("is_fmm"):
             device_id = device['data'].get('device_id')
             for old_domain, old_unique_id in (
@@ -126,7 +131,9 @@ class DeviceLocationSensor(CoordinatorEntity, SensorEntity):
 
     def _used_loc(self) -> dict:
         tag_data = self.coordinator.data.get(self.device_id, {}) or {}
-        if not tag_data.get('location_found'):
+        if not tag_data.get('location_found') or tag_data.get('position_unknown'):
+            # position_unknown: the opt-in "unknown after N failed attempts" rule hides the
+            # position; the last known fix stays stored and returns with the next new fix.
             return {}
         return tag_data.get('used_loc') or {}
 
@@ -199,6 +206,10 @@ class DeviceLocationSensor(CoordinatorEntity, SensorEntity):
             attrs['active_location_supported'] = tag_data.get('active_location_supported')
         if 'position_stale' in tag_data:
             attrs['position_stale'] = tag_data.get('position_stale')
+        if tag_data.get('position_unknown'):
+            attrs['position_unknown'] = True
+        if tag_data.get('failed_attempts'):
+            attrs['failed_attempts'] = tag_data.get('failed_attempts')
         # Which schedule this device is on: inside a Home Assistant zone it is polled on the
         # in-zone interval, anywhere else on the general one (see the integration options).
         if 'polling_interval' in tag_data:
@@ -240,7 +251,7 @@ class DeviceMapsLinkSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         tag_data = self.coordinator.data.get(self.device_id, {}) or {}
-        if not tag_data.get('location_found'):
+        if not tag_data.get('location_found') or tag_data.get('position_unknown'):
             return None
         used_loc = tag_data.get('used_loc') or {}
         url = google_maps_url(used_loc.get('latitude'), used_loc.get('longitude'))
@@ -249,6 +260,96 @@ class DeviceMapsLinkSensor(CoordinatorEntity, SensorEntity):
         if url and len(url) > 255:
             return None
         return url
+
+
+class DeviceLastNewFixSensor(CoordinatorEntity, SensorEntity):
+    """When Home Assistant last received a genuinely newer position for this device.
+
+    Native timestamp. It moves only when a read brought a fix whose own time is later than
+    every fix seen before; an unchanged fix, a 501 or a pending request never moves it. It is
+    different from the fix's own time (Samsung's `last_seen`) and from the last time
+    coordinates were merely read (`last_location_retrieved_at`). Survives restarts.
+    """
+
+    _attr_icon = "mdi:map-clock"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hass: HomeAssistant, coordinator, device):
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        device_id = device['data'].get("device_id")
+        name = device['data'].get("name") or device_id or "SmartThings Find"
+        self._attr_unique_id = f"stf_last_new_fix_{device_id}"
+        self._attr_name = f"{name} Last New Position Request"
+        self.hass = hass
+        self.device = device['data']
+        self.device_id = device_id
+        self._attr_device_info = device['ha_dev_info']
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self):
+        value = self.device.get('_last_new_fix_at')
+        return value if isinstance(value, datetime) else None
+
+
+class DeviceConnectionSensor(CoordinatorEntity, SensorEntity):
+    """Connection state of a phone/tablet/PC as reported by Samsung's CHECK_CONNECTION.
+
+    States: wifi, mobile, online (connected, type not stated), offline, unknown. It is refreshed
+    on the opted-in active cycle (Active Location switch on) and by the Ring pre-check; with
+    the switch off it keeps the last answer. 'unknown' means the check could not be read - not
+    that the device is offline. The attributes carry the sanitized structure of what the server
+    returned (no coordinates, ids or session data) to show which information it provides.
+    """
+
+    _attr_icon = "mdi:lan-connect"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["wifi", "mobile", "online", "offline", "unknown"]
+    _unrecorded_attributes = frozenset({"check_connection_structure", "server_data_structure"})
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hass: HomeAssistant, coordinator, device):
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        device_id = device['data'].get("device_id")
+        name = device['data'].get("name") or device_id or "SmartThings Find"
+        self._attr_unique_id = f"stf_connection_{device_id}"
+        self._attr_name = f"{name} Connection"
+        self.hass = hass
+        self.device = device['data']
+        self.device_id = device_id
+        self._attr_device_info = device['ha_dev_info']
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self):
+        connection = self.device.get('_connection') or {}
+        state = connection.get('state')
+        return state if state in self._attr_options else "unknown"
+
+    @property
+    def extra_state_attributes(self):
+        connection = self.device.get('_connection') or {}
+        checked_at = connection.get('checked_at')
+        return {
+            'checked_at': (
+                dt_util.as_local(checked_at).isoformat(timespec="seconds")
+                if isinstance(checked_at, datetime) else None
+            ),
+            'source_field': connection.get('source_field'),
+            'check_result_code': connection.get('result_code'),
+            'samsung_answered': connection.get('samsung_answered'),
+            'check_connection_structure': connection.get('structure'),
+            'server_data_structure': self.device.get('_server_structure'),
+        }
 
 
 class DeviceLocationRetrievalErrorSensor(CoordinatorEntity, SensorEntity):

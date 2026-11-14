@@ -12,6 +12,7 @@ import os
 import secrets
 import urllib.parse
 import uuid
+import re
 from datetime import datetime, timedelta
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.core import HomeAssistant
@@ -31,11 +32,12 @@ from .const import (
     CONF_IOT_ACCESS_TOKEN, CONF_IOT_REFRESH_TOKEN, CONF_DEVICE_ID,
     CONF_INSTALLED_APP_ID, CONF_ST_USER_UUID,
     WEB_FIND_CLIENT_ID, WEB_FIND_SCOPE, CONF_USER_AUTH_TOKEN, CONF_LOGIN_ID,
-    CONF_UPDATE_INTERVAL_DEFAULT, LOW_ACCURACY_THRESHOLD_M,
+    CONF_UPDATE_INTERVAL_DEFAULT, LOW_ACCURACY_THRESHOLD_M, CONNECTION_CACHE_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
 FMM_LOCATION_POLL_SECONDS = 60
+FMM_CONNECTION_POLL_SECONDS = 20
 
 URL_ENTRY_POINT = 'https://account.samsung.com/accounts/ANDROIDSDK/getEntryPoint'
 SMARTTHINGS_APP_VERSION = "1.8.21.28"
@@ -1789,6 +1791,7 @@ async def perform_fmm_operation(
     poll_seconds: int = 20,
     poll_interval: int = 3,
     request_history: list | None = None,
+    result_sink: dict | None = None,
 ) -> tuple[bool, str | None]:
     """Trigger an operation (LOCATION, RING, ...) for a device (tag or FMM) via the
     legacy website API (dm/addOperation.do), then poll dm/getOperationResult.do until
@@ -1851,6 +1854,11 @@ async def perform_fmm_operation(
             outcome="accepted" if accepted_data.get("resultCode") == "00" else "rejected",
             details={"operation": operation, "request_id_received": bool(accepted_data.get("reqId"))},
         )
+        if isinstance(result_sink, dict):
+            # Samsung itself answered (accepted or rejected), as opposed to a local
+            # session/HTTP/exception problem: only Samsung-side outcomes are counted
+            # towards the 'unknown position after N failed attempts' option.
+            result_sink["samsung_side"] = True
         if accepted_data.get("resultCode") != "00":
             reason = accepted_data.get("resultCode")
             _LOGGER.debug("[%s] %s request rejected: resultCode=%s", dev_name, operation, reason)
@@ -1886,6 +1894,8 @@ async def perform_fmm_operation(
             ]
             if candidates:
                 latest = candidates[-1]
+                if isinstance(result_sink, dict):
+                    result_sink["operation"] = latest
                 _record_fmm_request(
                     request_history,
                     "getOperationResult.do",
@@ -1926,6 +1936,238 @@ async def perform_fmm_operation(
         )
         _LOGGER.debug("[%s] %s request raised: %s", dev_name, operation, e, exc_info=True)
         return False, None
+
+
+# ---------------------------------------------------------------------------------------------
+# Device classes and connection state (Find My Mobile devices)
+# ---------------------------------------------------------------------------------------------
+PC_DEVICE_TYPES = {"PC", "PC DEVICE", "WINDOWS_PC", "PERSONAL_COMPUTER"}
+
+
+def _device_type_code(dev_data: dict) -> str:
+    return str(dev_data.get("web_device_type_code") or "").upper()
+
+
+def is_pc_device(dev_data: dict) -> bool:
+    code = _device_type_code(dev_data)
+    return bool(
+        dev_data.get("is_fmm")
+        and (code in PC_DEVICE_TYPES or "COMPUTER" in code or "LAPTOP" in code)
+    )
+
+
+def is_phone_device(dev_data: dict) -> bool:
+    """Phones and tablets: both can be reached actively and rung."""
+    code = _device_type_code(dev_data)
+    return bool(dev_data.get("is_fmm") and ("PHONE" in code or "TABLET" in code))
+
+
+def is_watch_device(dev_data: dict) -> bool:
+    return bool(dev_data.get("is_fmm") and "WATCH" in _device_type_code(dev_data))
+
+
+def is_active_connectable_device(dev_data: dict) -> bool:
+    """Devices with a network connection of their own that Samsung can actually reach
+    (phones, tablets, PCs). Passive FMM devices (Buds, watches) and tags are excluded: they
+    are routinely offline when away from their phone, so their last position always counts."""
+    return is_phone_device(dev_data) or is_pc_device(dev_data)
+
+
+# Sanitized-structure helpers. Samsung's FMM payloads are undocumented; to see what the server
+# actually exposes (and for future features) we log/expose the *shape* of its answers: every key
+# with its value type, and the value itself only for short, status-like fields that cannot
+# identify a person, a place, or a session.
+_STRUCT_BLOCKED_KEY = re.compile(
+    r"lat|lon|coord|loc|addr|ssid|ip$|^ip|mac|imei|phone|number|name|mail|token|id$|^id|user|usr|"
+    r"session|csrf|cookie|key|uncertain|serial|msisdn|iccid|imsi",
+    re.I,
+)
+_STRUCT_VALUE_KEY = re.compile(
+    r"conn|net|online|offline|wifi|wi_fi|cell|mobile|state|status|type|result|code|sts|support|"
+    r"mode|ring|cdma|tel|only",
+    re.I,
+)
+
+
+def sanitize_structure(value, depth: int = 0):
+    """Coordinate- and identity-free description of a JSON value (see comment above)."""
+    if isinstance(value, dict):
+        if depth >= 3:
+            return f"dict[{len(value)}]"
+        out = {}
+        for key, item in list(value.items())[:60]:
+            key = str(key)
+            if isinstance(item, (dict, list)):
+                out[key] = sanitize_structure(item, depth + 1)
+            elif item is None:
+                out[key] = None
+            elif _STRUCT_BLOCKED_KEY.search(key):
+                out[key] = type(item).__name__
+            elif isinstance(item, (bool, int, float)):
+                out[key] = item if _STRUCT_VALUE_KEY.search(key) else type(item).__name__
+            elif isinstance(item, str):
+                if _STRUCT_VALUE_KEY.search(key) and 0 < len(item) <= 32:
+                    out[key] = item
+                else:
+                    out[key] = "str" if item else "empty-str"
+            else:
+                out[key] = type(item).__name__
+        return out
+    if isinstance(value, list):
+        if depth >= 3:
+            return f"list[{len(value)}]"
+        return [sanitize_structure(item, depth + 1) for item in value[:5]]
+    return type(value).__name__
+
+
+_TRUE_VALUES = {"y", "yes", "true", "1", "on", "online", "connected"}
+_FALSE_VALUES = {"n", "no", "false", "0", "off", "offline", "disconnected", "none"}
+_MOBILE_HINTS = ("mobile", "cell", "lte", "3g", "4g", "5g", "data", "gsm", "umts")
+
+
+def parse_connection_state(op: dict | None) -> tuple[str, str | None]:
+    """Best-effort reading of a CHECK_CONNECTION operation.
+
+    The real payload is not documented, so this only looks at fields whose *names* talk about
+    connection/network/online/wifi/mobile, and returns ('wifi'|'mobile'|'online'|'offline'|
+    'unknown', name of the field it used). Anything it cannot read is 'unknown' - never
+    'offline' by default, because a failed or unreadable check says nothing about the device.
+    Refine once real sanitized structures are available (see DeviceConnectionSensor)."""
+    if not isinstance(op, dict):
+        return "unknown", None
+    found: list[tuple[str, str]] = []
+
+    def walk(data: dict, depth: int = 0) -> None:
+        for key, value in data.items():
+            if isinstance(value, dict):
+                if depth < 2:
+                    walk(value, depth + 1)
+                continue
+            if isinstance(value, (list, tuple)) or value is None:
+                continue
+            lower = str(key).lower()
+            if "only" in lower or _STRUCT_BLOCKED_KEY.search(str(key)) and "net" not in lower:
+                continue
+            text = str(value).strip().lower()
+            if "wifi" in lower or "wi-fi" in lower or "wlan" in lower:
+                if text in _TRUE_VALUES:
+                    found.append(("wifi", str(key)))
+                elif text not in _FALSE_VALUES and "wifi" in text.replace("-", ""):
+                    found.append(("wifi", str(key)))
+            elif any(hint in lower for hint in ("mobile", "cell", "lte")):
+                if text in _TRUE_VALUES:
+                    found.append(("mobile", str(key)))
+            elif "online" in lower or "connected" in lower:
+                if text in _TRUE_VALUES:
+                    found.append(("online", str(key)))
+                elif text in _FALSE_VALUES:
+                    found.append(("offline", str(key)))
+            elif "conn" in lower or "net" in lower:
+                compact = text.replace("-", "").replace("_", "")
+                if "wifi" in compact or "wlan" in compact:
+                    found.append(("wifi", str(key)))
+                elif any(hint in compact for hint in _MOBILE_HINTS):
+                    found.append(("mobile", str(key)))
+                elif text in _FALSE_VALUES:
+                    found.append(("offline", str(key)))
+                elif text in _TRUE_VALUES:
+                    found.append(("online", str(key)))
+
+    walk(op)
+    for wanted in ("wifi", "mobile", "offline", "online"):
+        for state, source in found:
+            if state == wanted:
+                return state, source
+    return "unknown", None
+
+
+async def check_fmm_connection(
+    hass: HomeAssistant,
+    session: aiohttp.ClientSession,
+    entry_id: str,
+    dev_data: dict,
+    *,
+    use_cache: bool = True,
+) -> dict:
+    """Ask Samsung whether an FMM device is connected right now (CHECK_CONNECTION, same
+    addOperation/getOperationResult flow and website session as every other operation).
+
+    Never raises for a failed check: the state is then 'unknown'. The result is kept in
+    dev_data['_connection'] (shared by the Connection sensor and the Ring pre-check) together
+    with the sanitized structure of Samsung's answer."""
+    now = datetime.now(pytz.UTC)
+    cached = dev_data.get("_connection")
+    if (
+        use_cache
+        and isinstance(cached, dict)
+        and cached.get("checked_at")
+        and (now - cached["checked_at"]).total_seconds() < CONNECTION_CACHE_SECONDS
+    ):
+        return cached
+    dev_name = dev_data.get("name") or dev_data.get("device_id")
+    history = dev_data.setdefault("_fmm_request_history", [])
+    sink: dict = {}
+    success, reason = False, None
+    try:
+        success, reason = await perform_fmm_operation(
+            hass, session, entry_id, dev_data, "CHECK_CONNECTION",
+            poll_seconds=FMM_CONNECTION_POLL_SECONDS,
+            request_history=history,
+            result_sink=sink,
+        )
+    except ConfigEntryAuthFailed:
+        raise
+    except Exception:
+        _LOGGER.debug("[%s] CHECK_CONNECTION raised", dev_name, exc_info=True)
+    op = sink.get("operation")
+    state, source = parse_connection_state(op)
+    structure = sanitize_structure(op) if isinstance(op, dict) else None
+    result = {
+        "state": state,
+        "source_field": source,
+        "checked_at": now,
+        "success": bool(success),
+        "result_code": reason,
+        "samsung_answered": bool(sink.get("samsung_side")),
+        "structure": structure,
+    }
+    dev_data["_connection"] = result
+    _record_fmm_request(
+        history, "connection_check", outcome=state,
+        details={"source_field": source, "operation_returned": isinstance(op, dict)},
+    )
+    signature = json.dumps(structure, sort_keys=True, default=str)
+    if dev_data.get("_connection_structure_logged") != signature:
+        dev_data["_connection_structure_logged"] = signature
+        _LOGGER.info(
+            "[%s] CHECK_CONNECTION result: state=%s (field=%s, success=%s, code=%s). "
+            "Sanitized structure of Samsung's answer: %s",
+            dev_name, state, source, success, reason, structure,
+        )
+    return result
+
+
+def register_position_fix(dev_data: dict, tag_data: dict, now: datetime | None = None) -> bool:
+    """Track whether this read brought a genuinely newer fix (its gps_date is strictly later
+    than the newest one ever seen for this device). Only then dev_data['_last_new_fix_at'] is
+    set to the current time; an unchanged fix, a 501, or the first read after a restart that
+    returns the position restored from disk never counts. Returns True for a new fix."""
+    loc = tag_data.get("used_loc") or {}
+    gps_date = loc.get("gps_date")
+    if not (
+        tag_data.get("update_success")
+        and tag_data.get("location_found")
+        and isinstance(gps_date, datetime)
+    ):
+        return False
+    if gps_date.tzinfo is None:
+        gps_date = gps_date.replace(tzinfo=pytz.UTC)
+    known = dev_data.get("_known_gps_date")
+    if known is not None and gps_date <= known:
+        return False
+    dev_data["_known_gps_date"] = gps_date
+    dev_data["_last_new_fix_at"] = now or datetime.now(pytz.UTC)
+    return True
 
 
 async def ring_fmm_device(
@@ -1992,12 +2234,19 @@ async def get_fmm_device_location(
 
     active_location_error = None
     active_location_attempted = False
+    active_sink: dict = {}
     if force_active or dev_data.get("active_location_requested"):
         # active_location_requested is set live by ActiveLocationSwitch (switch.py).
         # An enabled switch opts this device into active retrieval on every poll,
         # including Buds and watches; prior 501 responses and transient failures do not
         # suppress later retries.
         active_location_attempted = True
+        if dev_data.get("active_location_requested") and is_active_connectable_device(dev_data):
+            # Same website session and the same opted-in cycle as the LOCATION request
+            # below; never sent while the switch is off. Its answer feeds the Connection
+            # sensor and is reused (short cache) by the Ring pre-check.
+            await check_fmm_connection(hass, session, entry_id, dev_data)
+        active_sink = {}
         active_success, active_reason = await perform_fmm_operation(
             hass,
             session,
@@ -2006,6 +2255,7 @@ async def get_fmm_device_location(
             "LOCATION",
             poll_seconds=FMM_LOCATION_POLL_SECONDS,
             request_history=request_history,
+            result_sink=active_sink,
         )
         if active_success:
             # A deliberate manual retry can prove that an operation previously
@@ -2379,9 +2629,30 @@ async def get_fmm_device_location(
             "offline_find_supported": menu_flat.get("offlineFind") == "Y",
         }
 
+        # What the server actually tells us, as sanitized shapes (no coordinates, ids or
+        # session data): kept on the Connection sensor and logged whenever it changes, so
+        # new fields Samsung adds can be spotted and used later.
+        server_structure = {
+            "last_selected_device": sanitize_structure(last_selected),
+            "menu": sanitize_structure(body.get("menu")),
+            "operations": {},
+        }
+        for op in operations:
+            if isinstance(op, dict):
+                op_key = str(op.get("oprnType") or "UNKNOWN")
+                if op_key not in server_structure["operations"] and len(server_structure["operations"]) < 12:
+                    server_structure["operations"][op_key] = sanitize_structure(op)
+        structure_signature = json.dumps(server_structure, sort_keys=True, default=str)
+        if dev_data.get("_server_structure_logged") != structure_signature:
+            dev_data["_server_structure_logged"] = structure_signature
+            _LOGGER.info("[%s] Sanitized structure of Samsung's Find response: %s", dev_name, server_structure)
+        dev_data["_server_structure"] = server_structure
+
         return {
             "dev_name": dev_name,
             "dev_id": web_dvce_id,
+            "active_location_attempted": active_location_attempted,
+            "active_attempt_samsung_outcome": bool(active_location_attempted and active_sink.get("samsung_side")),
             "update_success": True,
             "fetch_error": None,
             "position_error": position_error,

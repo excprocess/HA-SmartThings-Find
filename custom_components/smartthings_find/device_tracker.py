@@ -80,7 +80,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
                     'restored_position': True,
                 })
                 self.coordinator.data[self.device_id] = data
-        if data.get('location_found'):
+        if data.get('location_found') and not data.get('position_unknown'):
             update_device_maps_link(self.hass, self.device_id, data.get('used_loc'))
         self._last_tag_data = self.coordinator.data.get(self.device_id)
         self.async_on_remove(
@@ -121,7 +121,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
     def latitude(self):
         """Return the latitude of the device."""
         data = self.coordinator.data.get(self.device_id, {})
-        if data.get('location_found'):
+        if data.get('location_found') and not data.get('position_unknown'):
             return data.get('used_loc', {}).get('latitude', None)
         return None
 
@@ -129,7 +129,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
     def longitude(self):
         """Return the longitude of the device."""
         data = self.coordinator.data.get(self.device_id, {})
-        if data.get('location_found'):
+        if data.get('location_found') and not data.get('position_unknown'):
             return data.get('used_loc', {}).get('longitude', None)
         return None
     
@@ -199,6 +199,11 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
             "fmm_request_history",
             "fmm_last_interaction",
             "next_poll",
+            "new_fix_received",
+            "last_new_fix_at",
+            "failed_attempts",
+            "active_location_attempted",
+            "active_attempt_samsung_outcome",
         }
         attrs = {
             key: value

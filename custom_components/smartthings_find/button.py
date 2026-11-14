@@ -7,7 +7,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, MAX_STALE_FALLBACK_CYCLES
-from .utils import get_fmm_device_location, update_device_maps_link
+from .utils import get_fmm_device_location, update_device_maps_link, register_position_fix
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,6 +93,10 @@ class UpdateLocationButton(ButtonEntity):
             and (not previous_time or result_time > previous_time)
         )
 
+        # Same rule as the scheduled poll: only a strictly newer fix updates "Last New
+        # Position Request" (a manual press is never counted as a failed attempt).
+        new_fix = register_position_fix(self.device, tag_data)
+
         if tag_data.get('update_success'):
             self.device['_consecutive_fetch_failures'] = 0
             # A manual refresh counts as this device's poll: its next scheduled one starts
@@ -118,7 +122,9 @@ class UpdateLocationButton(ButtonEntity):
                 # (computed above, before the fallback) correctly stays False so the
                 # message below doesn't lie about what just happened.
 
-        if tag_data.get('location_found'):
+        self.coordinator.apply_position_policy(self.device, tag_data, new_fix, False)
+
+        if tag_data.get('location_found') and not tag_data.get('position_unknown'):
             update_device_maps_link(self.hass, device_id, tag_data.get('used_loc'))
 
         # Push just this device's fresh result into the coordinator so listening entities
@@ -144,6 +150,10 @@ class UpdateLocationButton(ButtonEntity):
                 },
                 'last_location_retrieved_at': (
                     retrieved_at.isoformat() if retrieved_at else None
+                ),
+                'last_new_fix_at': (
+                    self.device['_last_new_fix_at'].isoformat()
+                    if self.device.get('_last_new_fix_at') else None
                 ),
             }
             try:

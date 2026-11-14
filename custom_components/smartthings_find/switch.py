@@ -10,7 +10,10 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN, RING_TIMEOUT_SECONDS
-from .utils import ring_device, stop_ring_device, format_ring_error, ring_fmm_device, stop_ring_fmm_device
+from .utils import (
+    ring_device, stop_ring_device, format_ring_error, ring_fmm_device, stop_ring_fmm_device,
+    check_fmm_connection, is_watch_device,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,10 +32,13 @@ async def async_setup_entry(
             entities.append(RingSwitch(hass, entry.entry_id, device))
         if device["data"].get("is_fmm"):
             entities.append(ActiveLocationSwitch(hass, entry.entry_id, device, coordinator))
-            if device["data"].get("web_device_type_code") in ("PHONE", "PHONE DEVICE"):
-                # Ring is only exposed by the website itself for phones - watches/buds/PC
-                # don't show a ring control there either (buds/watches also empirically 501
-                # on the LOCATION operation - no network connection of their own).
+            if (
+                device["data"].get("web_device_type_code") in ("PHONE", "PHONE DEVICE")
+                or is_watch_device(device["data"])
+            ):
+                # Ring is exposed for phones and, as long as they are online and connected,
+                # watches. Buds/PC don't offer it. Every ring first checks that the device
+                # is online (see FmmRingSwitch.async_turn_on).
                 entities.append(FmmRingSwitch(hass, entry.entry_id, device))
     async_add_entities(entities)
 
@@ -194,6 +200,18 @@ class FmmRingSwitch(SwitchEntity):
         dev_name = self.device.get("name") or self.device.get("device_id")
         if not self.device.get("web_dvce_id"):
             raise HomeAssistantError(f"Website device id for '{dev_name}' not resolved yet - try again in a bit")
+
+        # Never ring a device that Samsung reports as offline: say so instead. A check that
+        # could not be completed or read ('unknown') does not block the ring - that would be
+        # our limitation, not evidence the device is unreachable.
+        connection = await check_fmm_connection(
+            self.hass, session, self.entry_id, self.device, use_cache=False)
+        if connection.get("state") == "offline":
+            raise HomeAssistantError(f"'{dev_name}' is offline - the ring was not sent")
+        if connection.get("state") == "unknown":
+            _LOGGER.debug(
+                "[%s] Connection state could not be determined before ringing; ringing anyway",
+                dev_name)
 
         success, reason = await ring_fmm_device(self.hass, session, self.entry_id, self.device)
         if success:

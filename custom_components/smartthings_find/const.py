@@ -23,6 +23,18 @@ CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL = "active_passive_device_interval"
 CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT = 1800
 MIN_UPDATE_INTERVAL = 30
 
+# Device ids (DOMAIN, device_id) the user does not want in Home Assistant at all: no polling,
+# no entities.
+CONF_EXCLUDED_DEVICES = "excluded_devices"
+# Only for devices that can be reached actively (phones, tablets, PCs) with Active Location on:
+# after this many scheduled active attempts in a row that end without a genuinely newer fix
+# (Samsung-side outcomes only) the position is presented as unknown. 0 = disabled.
+CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS = "unknown_after_failed_attempts"
+CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT = 0
+
+# A CHECK_CONNECTION answer is reused for this long (Ring pre-check always asks fresh).
+CONNECTION_CACHE_SECONDS = 60
+
 # Keep location fixes even when this uncertain, but flag them for the user.
 LOW_ACCURACY_THRESHOLD_M = 100
 

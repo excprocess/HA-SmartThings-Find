@@ -1,5 +1,18 @@
 # Changelog
 
+## 8.2.0 (pre-release)
+
+### Added
+- **Last New Position Request** sensor (diagnostic, native timestamp) for every tracked device. It moves only when a read returns a fix strictly newer than any seen before; an unchanged fix, a `501` or a pending request never moves it, and neither does the first read after a restart that returns the restored position. The value survives restarts.
+- **Connection** sensor (diagnostic) for phones, tablets and PCs: `wifi`, `mobile`, `online`, `offline` or `unknown`, from Samsung's `CHECK_CONNECTION` operation. It is refreshed in the opted-in Active Location cycle (never with the switch off) and before every Ring; `unknown` means the answer could not be read, not that the device is offline. The parser is a best-effort first version: Samsung does not document the payload.
+- **Sanitized server structure.** The shape of what Samsung returns (every key with its value type, values only for short status-like fields; never coordinates, ids, names or session data) is logged at INFO when it changes and exposed in the Connection sensor attributes (`check_connection_structure`, `server_data_structure`), to see what the server provides and to refine the parser.
+- **Exclude devices** option: selected devices get no polling, no Samsung requests and no entities (existing ones are removed on reload); they can be included again from the same option.
+- **Ring for watches** (Samsung requires the watch to be online and connected).
+- **Unknown position after N failed attempts** option (0 = off). For phones, tablets and PCs with Active Location on, N scheduled active attempts in a row that Samsung answered without bringing a genuinely newer fix make the tracker and location sensors show *unknown*. Local session/HTTP errors and manual presses are not counted; a genuine new fix restores the position immediately. The last position stays stored. Buds, watches, SmartTags and devices with the switch off always keep their last known position.
+
+### Changed
+- Ring on phones and watches first checks the connection and refuses with an *offline* error if Samsung reports the device offline. If the connection cannot be determined the ring is sent anyway. SmartTag ring is unchanged.
+
 ## 8.1.13
 
 ### Changed

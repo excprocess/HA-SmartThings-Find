@@ -2,6 +2,7 @@ from typing import Any, Dict
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlowResult,
@@ -24,7 +25,10 @@ from .const import (
     CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
     MIN_UPDATE_INTERVAL,
     CONF_USER_AUTH_TOKEN,
-    CONF_LOGIN_ID
+    CONF_LOGIN_ID,
+    CONF_EXCLUDED_DEVICES,
+    CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS,
+    CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT,
 )
 from .utils import do_login_stage_one, do_login_stage_two
 import asyncio
@@ -185,10 +189,42 @@ class SmartThingsFindOptionsFlowHandler(OptionsFlowWithConfigEntry):
                     CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
                 )),
             )
+            options[CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS] = max(
+                0, int(options.get(
+                    CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS,
+                    CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT,
+                ) or 0))
+            # The device picker is only offered when Samsung's device list is known (the
+            # entry is loaded); otherwise keep the existing exclusions untouched.
+            options.setdefault(
+                CONF_EXCLUDED_DEVICES, list(self.options.get(CONF_EXCLUDED_DEVICES) or []))
             return self.async_create_entry(title="", data=options)
+
+        known = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self.config_entry.entry_id, {})
+            .get("all_devices")
+            or []
+        )
+        excluded_now = list(self.options.get(CONF_EXCLUDED_DEVICES) or [])
+        choices = {d["device_id"]: d.get("name") or d["device_id"] for d in known if d.get("device_id")}
+        for device_id in excluded_now:
+            choices.setdefault(device_id, device_id)
+        device_fields = {}
+        if choices:
+            device_fields[vol.Optional(
+                CONF_EXCLUDED_DEVICES, default=excluded_now
+            )] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[{"value": k, "label": v} for k, v in choices.items()],
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
 
         data_schema = vol.Schema(
             {
+                **device_fields,
                 vol.Optional(
                     CONF_UPDATE_INTERVAL,
                     default=self.options.get(
@@ -208,6 +244,13 @@ class SmartThingsFindOptionsFlowHandler(OptionsFlowWithConfigEntry):
                         CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
                     ),
                 ): vol.All(vol.Coerce(int), vol.Clamp(min=MIN_UPDATE_INTERVAL)),
+                vol.Optional(
+                    CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS,
+                    default=self.options.get(
+                        CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS,
+                        CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT,
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Clamp(min=0)),
                 # Active-mode is now a per-device "Active Location" switch (only on FMM
                 # devices - phone/tablet/watch/buds - where it actually has an effect;
                 # SmartTags always reject it, resultCode=01) instead of a single global

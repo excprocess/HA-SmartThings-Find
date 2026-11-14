@@ -20,6 +20,14 @@ This project is a fork in a long chain: [Vedeneb/HA-SmartThings-Find](https://gi
 login rework from [PixelShober/HA-SmartThings-Find](https://github.com/PixelShober/HA-SmartThings-Find).
 See [Credits](#credits) for everything this fork builds on.
 
+## What's new in 8.2 (pre-release)
+
+- **Last New Position Request** sensor: when Home Assistant last received a genuinely newer position (native timestamp, survives restarts).
+- **Connection** sensor for phones, tablets and PCs (`wifi` / `mobile` / `online` / `offline` / `unknown`). Its attributes show the sanitized structure of what Samsung returns, so new fields can be spotted. The first version reads Samsung's undocumented answer on a best-effort basis; please share the sanitized structure from the log if it shows `unknown`.
+- **Exclude devices** in the integration options: no polling and no entities for the devices you don't want to track.
+- **Ring for watches** (must be online and connected). Phones and watches are checked first and the ring is refused with an *offline* error if Samsung reports the device offline.
+- **Unknown position after N failed attempts** (options, `0` = off): for phones, tablets and PCs with Active Location on, the position is shown as *unknown* after N scheduled active attempts in a row without a genuinely newer fix. Buds, watches and SmartTags always keep their last known position.
+
 ## What's new in 8.1
 
 - **8.1.8:** FMM request details are written to the Home Assistant log while the diagnostic entity shows only its latest interaction and the consecutive failure count. Device trackers no longer expose the internal `is_buds` flag. Location and next-update timestamps use ISO 8601 in Home Assistant's timezone, and `last_location_retrieved_at` records when Home Assistant last read coordinates.
@@ -72,7 +80,7 @@ See the [changelog](CHANGELOG.md) for the details.
 | `sensor` `<name> Location` / `Maps Link` | Same as for tags, plus `telephony_support`, `wifi_only`, `cdma`, `ring_supported`, `offline_find_supported` attributes as Samsung reports them, and `in_zone` / `polling_interval` (the schedule the device is on) |
 | `switch` `<name> Active Location` | Configuration entity. Toggling it requests a poll immediately; later polls ask the device for a fresh fix first |
 | `button` `<name> Update Location` | Asks the device for a fresh fix right now, and updates only that device |
-| `switch` `<name> Ring` | Phones only (the website shows no ring for the other types) |
+| `switch` `<name> Ring` | Phones and watches (the website shows no ring for the other types); refused with an offline error if the device is offline |
 | `binary_sensor` `<name> Location Retrieval Error` | Updated on each poll; reports failed requests, missing newer positions, and accuracy over 100 m without discarding the returned fix. |
 
 There is deliberately **no battery sensor** for these devices: Samsung only reports it when the
@@ -104,7 +112,7 @@ Read this before opening an issue, most of it comes from how Samsung's service b
   only exist for Find My Mobile devices. The **Location Retrieval Error** binary sensor reports failed
   requests and unreadable responses. Position age remains visible as the `position_stale` attribute on
   the Location sensor; age alone does not turn the error sensor on.
-- **Ring only works for phones**, and only if the phone can be reached.
+- **Ring works for phones and watches**, and only if the device is online and connected.
 - **Positions reported by nearby devices.** A watch, PC or earbuds that nobody asks can still get a new
   position when another Galaxy device passes close to it. It shows up here when Samsung returns it in
   the clear. If Samsung returns it end-to-end encrypted it can't be read (the same limit as

@@ -10,6 +10,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers import device_registry as dr
 
 from .const import (
     DOMAIN,
@@ -32,6 +33,9 @@ from .const import (
     CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
     MIN_UPDATE_INTERVAL,
     MAX_STALE_FALLBACK_CYCLES,
+    CONF_EXCLUDED_DEVICES,
+    CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS,
+    CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT,
 )
 from .utils import (
     is_in_active_zone,
@@ -39,6 +43,8 @@ from .utils import (
     get_device_location,
     update_device_maps_link,
     get_device_ble_metadata,
+    is_active_connectable_device,
+    register_position_fix,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,6 +56,20 @@ PLATFORMS = [
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
 ]
+
+def _parse_iso(value):
+    """Aware datetime from a stored ISO string, or None."""
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the SmartThings Find component."""
@@ -100,7 +120,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     # Load all SmartThings-Find devices from the users account
     devices = await get_devices(hass, session, entry.entry_id)
-    
+
+    # Every device Samsung knows (also the excluded ones) is kept for the options flow, so an
+    # excluded device can be included again. Excluded devices never reach the coordinator: no
+    # polling, no Samsung request, no entities.
+    hass.data[DOMAIN][entry.entry_id]["all_devices"] = [
+        {"device_id": d["data"].get("device_id"), "name": d["data"].get("name")}
+        for d in devices
+    ]
+    excluded_ids = set(entry.options.get(CONF_EXCLUDED_DEVICES) or [])
+    if excluded_ids:
+        device_reg = dr.async_get(hass)
+        for device in devices:
+            excluded_id = device["data"].get("device_id")
+            if excluded_id in excluded_ids:
+                ha_dev = device_reg.async_get_device({(DOMAIN, excluded_id)})
+                if ha_dev:
+                    # Removes the device together with its entities.
+                    device_reg.async_remove_device(ha_dev.id)
+        devices = [d for d in devices if d["data"].get("device_id") not in excluded_ids]
+        _LOGGER.info("Excluded %s device(s) from tracking", len(excluded_ids))
+
     # Create an update coordinator. This is responsible to regularly
     # fetch data from STF and update the device_tracker and sensor
     # entities
@@ -112,6 +152,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL,
         CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
     )
+    unknown_after_failed_attempts = int(entry.options.get(
+        CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS, CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT) or 0)
     position_store = Store(hass, 1, f"{DOMAIN}_{entry.entry_id}_positions")
     try:
         saved_positions = await position_store.async_load() or {}
@@ -150,6 +192,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             retrieved_at = retrieved_at.replace(tzinfo=timezone.utc)
         used_loc = {**used_loc, 'gps_date': gps_date}
         dev_data['_last_good_loc'] = (None, used_loc)
+        # Seed the "newest fix ever seen" so the first read after a restart that returns the
+        # restored position is not mistaken for a new one.
+        if gps_date:
+            dev_data['_known_gps_date'] = gps_date
+        last_new_fix_at = _parse_iso(saved.get('last_new_fix_at'))
+        if last_new_fix_at:
+            dev_data['_last_new_fix_at'] = last_new_fix_at
         interval = int(dev_data.get('_poll_interval_s') or update_interval)
         position_stale = not gps_date or (
             now_utc - gps_date
@@ -167,7 +216,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = SmartThingsFindCoordinator(
         hass, session, devices, update_interval, in_zone_interval, entry.entry_id,
         position_store, saved_positions,
-        active_passive_device_interval=active_passive_device_interval)
+        active_passive_device_interval=active_passive_device_interval,
+        unknown_after_failed_attempts=unknown_after_failed_attempts)
     if restored_data:
         coordinator.data = restored_data
 
@@ -253,6 +303,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         position_store=None,
         saved_positions: dict | None = None,
         active_passive_device_interval: int = CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
+        unknown_after_failed_attempts: int = 0,
     ):
         """Initialize the coordinator."""
         self.session = session
@@ -263,6 +314,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         self.saved_positions = saved_positions or {}
         self.away_interval = update_interval
         self.in_zone_interval = in_zone_interval or update_interval
+        self.unknown_after_failed_attempts = max(0, int(unknown_after_failed_attempts or 0))
         self.active_passive_device_interval = max(
             MIN_UPDATE_INTERVAL, int(active_passive_device_interval)
         )
@@ -330,6 +382,33 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         tag_data['in_zone'] = in_zone
         tag_data['polling_interval'] = interval
 
+    def apply_position_policy(
+        self, dev_data: dict, tag_data: dict, new_fix: bool, counted: bool
+    ) -> None:
+        """Optional "unknown after N failed attempts" rule.
+
+        Applies only to devices Samsung can reach actively (phones, tablets, PCs) whose Active
+        Location switch is on. ``counted`` is a scheduled active attempt that Samsung itself
+        answered (rejected, failed, pending/timeout) without bringing a genuinely newer fix;
+        local session/HTTP errors are not counted. A genuine new fix resets the counter.
+        Passive devices (Buds, watches), SmartTags and anything with the switch off never
+        become unknown: for them the last position is always the good one. Only the
+        presentation changes - the last position stays stored and returns with the next fix.
+        """
+        threshold = self.unknown_after_failed_attempts
+        eligible = (
+            threshold > 0
+            and bool(dev_data.get('active_location_requested'))
+            and is_active_connectable_device(dev_data)
+        )
+        if new_fix or not eligible:
+            dev_data['_failed_attempts'] = 0
+        elif counted:
+            dev_data['_failed_attempts'] = dev_data.get('_failed_attempts', 0) + 1
+        attempts = dev_data.get('_failed_attempts', 0)
+        tag_data['failed_attempts'] = attempts
+        tag_data['position_unknown'] = bool(eligible and attempts >= threshold)
+
     @staticmethod
     def _is_due(dev_data: dict, previous: dict, now: float) -> bool:
         if dev_data['device_id'] not in previous:
@@ -348,6 +427,8 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Updating locations...")
             for device in self.devices:
                 dev_data = device['data']
+                new_fix = False
+                counted = False
                 dev_name = dev_data.get('name') or dev_data['device_id']
                 if not self._is_due(dev_data, previous, now):
                     tags[dev_data['device_id']] = previous[dev_data['device_id']]
@@ -379,6 +460,8 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                     tag_data['last_location_retrieved_at'] = datetime.now(timezone.utc)
                 fetch_ok = bool(tag_data.get('update_success'))
                 if fetch_ok:
+                    new_fix = register_position_fix(dev_data, tag_data)
+                    counted = bool(tag_data.get('active_attempt_samsung_outcome')) and not new_fix
                     dev_data['_consecutive_fetch_failures'] = 0
                     dev_data.pop('_rate_limit_failures', None)
                     self.schedule_device(dev_data, tag_data, now)
@@ -464,7 +547,8 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                             dev_name, failures,
                         )
                 tags[dev_data['device_id']] = tag_data
-                if tag_data.get('location_found'):
+                self.apply_position_policy(dev_data, tag_data, new_fix, counted)
+                if tag_data.get('location_found') and not tag_data.get('position_unknown'):
                     update_device_maps_link(
                         self.hass, dev_data['device_id'], tag_data.get('used_loc'))
                 # Per-tag settings live in the SmartThings device API rather than the
@@ -477,6 +561,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                         dev_data.get('st_device_id') or dev_data['device_id'],
                     )
             updated_positions = dict(self.saved_positions)
+            dev_by_id = {d['data']['device_id']: d['data'] for d in self.devices}
             for device_id, tag_data in tags.items():
                 used_loc = tag_data.get('used_loc') or {}
                 if not (
@@ -495,6 +580,10 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                     },
                     'last_location_retrieved_at': (
                         retrieved_at.isoformat() if retrieved_at else None
+                    ),
+                    'last_new_fix_at': (
+                        dev_by_id[device_id]['_last_new_fix_at'].isoformat()
+                        if dev_by_id.get(device_id, {}).get('_last_new_fix_at') else None
                     ),
                 }
             if self.position_store and updated_positions != self.saved_positions:
