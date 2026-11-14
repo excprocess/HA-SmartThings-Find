@@ -25,6 +25,7 @@ See [Credits](#credits) for everything this fork builds on.
 - **Last New Position Request** sensor: when Home Assistant last received a genuinely newer position (native timestamp, survives restarts).
 - **Connection** sensor for phones, tablets and PCs (`wifi` / `mobile` / `online` / `offline` / `unknown`). Its attributes show the sanitized structure of what Samsung returns, so new fields can be spotted. The first version reads Samsung's undocumented answer on a best-effort basis; please share the sanitized structure from the log if it shows `unknown`.
 - **Exclude devices** in the integration options: no polling and no entities for the devices you don't want to track.
+- **Battery for Find My Mobile devices & Left/Right Battery for Galaxy Buds**: battery sensors for phones, tablets, watches and PCs, plus separate `<name> Left Battery` and `<name> Right Battery` sensors for Galaxy Buds.
 - **Ring for watches** (must be online and connected). Phones and watches are checked first and the ring is refused with an *offline* error if Samsung reports the device offline.
 - **Unknown position after N failed attempts** (options, `0` = off): for phones, tablets and PCs with Active Location on, the position is shown as *unknown* after N scheduled active attempts in a row without a genuinely newer fix. Buds, watches and SmartTags always keep their last known position.
 
@@ -81,10 +82,9 @@ See the [changelog](CHANGELOG.md) for the details.
 | `switch` `<name> Active Location` | Configuration entity. Toggling it requests a poll immediately; later polls ask the device for a fresh fix first |
 | `button` `<name> Update Location` | Asks the device for a fresh fix right now, and updates only that device |
 | `switch` `<name> Ring` | Phones and watches (the website shows no ring for the other types); refused with an offline error if the device is offline |
+| `sensor` `<name> Battery` | Battery level for phones, tablets, watches and PCs (`unknown` for phones/tablets/PCs when Active Location is off; watches keep the last known value) |
+| `sensor` `<name> Left Battery` / `<name> Right Battery` | Separate Left and Right earbud battery levels for Galaxy Buds (`extra.left.battery` / `extra.right.battery`) |
 | `binary_sensor` `<name> Location Retrieval Error` | Updated on each poll; reports failed requests, missing newer positions, and accuracy over 100 m without discarding the returned fix. |
-
-There is deliberately **no battery sensor** for these devices: Samsung only reports it when the
-device itself answers, so it was almost always stale.
 
 This integration does **not** let you react to button presses on a SmartTag. There are other ways to do that.
 

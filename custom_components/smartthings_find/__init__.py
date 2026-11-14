@@ -200,6 +200,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         last_new_fix_at = _parse_iso(saved.get('last_new_fix_at'))
         if last_new_fix_at:
             dev_data['_last_new_fix_at'] = last_new_fix_at
+        restored_batt = {}
+        if not is_active_connectable_device(dev_data):
+            for b_key in ('battery_level', 'left_battery_level', 'right_battery_level'):
+                if saved.get(b_key) is not None:
+                    restored_batt[b_key] = saved.get(b_key)
+            if restored_batt:
+                dev_data['_last_battery'] = dict(restored_batt)
         interval = int(dev_data.get('_poll_interval_s') or update_interval)
         position_stale = not gps_date or (
             now_utc - gps_date
@@ -211,6 +218,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             'restored_position': True,
             'position_stale': position_stale,
             'last_location_retrieved_at': retrieved_at,
+            'battery_level': restored_batt.get('battery_level'),
+            'left_battery_level': restored_batt.get('left_battery_level'),
+            'right_battery_level': restored_batt.get('right_battery_level'),
         }
     if restored_data:
         _LOGGER.info("Restored last known positions for %s devices", len(restored_data))
@@ -583,6 +593,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                     continue
                 gps_date = used_loc.get('gps_date')
                 retrieved_at = tag_data.get('last_location_retrieved_at')
+                last_batt = dev_by_id.get(device_id, {}).get('_last_battery') or {}
                 updated_positions[device_id] = {
                     'used_loc': {
                         **used_loc,
@@ -595,6 +606,9 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                         dev_by_id[device_id]['_last_new_fix_at'].isoformat()
                         if dev_by_id.get(device_id, {}).get('_last_new_fix_at') else None
                     ),
+                    'battery_level': tag_data.get('battery_level', last_batt.get('battery_level')),
+                    'left_battery_level': tag_data.get('left_battery_level', last_batt.get('left_battery_level')),
+                    'right_battery_level': tag_data.get('right_battery_level', last_batt.get('right_battery_level')),
                 }
             if self.position_store and updated_positions != self.saved_positions:
                 try:

@@ -161,4 +161,129 @@ for _ in range(10):
     tag = cycle(off, phone)
 check("0 disables the rule", tag["position_unknown"], False)
 
+# --- FMM and Buds Left/Right battery extraction (samsung-re-find PR #2) -------------------------
+check("is_buds_device via is_buds flag", u.is_buds_device({"is_fmm": True, "is_buds": True}), True)
+check("is_buds_device via BUDS code", u.is_buds_device({"is_fmm": True, "web_device_type_code": "BUDS"}), True)
+check("is_buds_device false for phone", u.is_buds_device({"is_fmm": True, "web_device_type_code": "PHONE"}), False)
+
+buds_ops = [
+    {
+        "oprnType": "CHECK_CONNECTION",
+        "oprnStsCd": "2800",
+        "oprnResultCode": "1200",
+        "extra": {
+            "left": {"battery": "100"},
+            "right": {"battery": "87"},
+        },
+    }
+]
+check(
+    "extract_fmm_battery reads Buds Left/Right battery channels",
+    u.extract_fmm_battery(buds_ops),
+    {"battery_level": None, "left_battery_level": 100, "right_battery_level": 87},
+)
+
+invalid_buds_ops = [
+    {
+        "oprnType": "CHECK_CONNECTION",
+        "battery": "not-a-number",
+        "extra": {
+            "left": {"battery": "not-a-number"},
+            "right": {"battery": None},
+        },
+    }
+]
+check(
+    "extract_fmm_battery ignores invalid battery values",
+    u.extract_fmm_battery(invalid_buds_ops),
+    {"battery_level": None, "left_battery_level": None, "right_battery_level": None},
+)
+
+phone_ops = [
+    {
+        "oprnType": "CHECK_CONNECTION",
+        "battery": "84",
+        "extra": {"battery": "84", "isConnected": True},
+    }
+]
+check(
+    "extract_fmm_battery reads general FMM battery",
+    u.extract_fmm_battery(phone_ops),
+    {"battery_level": 84, "left_battery_level": None, "right_battery_level": None},
+)
+check(
+    "extract_fmm_battery maps symbolic FULL battery",
+    u.extract_fmm_battery([{"oprnType": "CHECK_CONNECTION", "battery": "FULL"}]),
+    {"battery_level": 100, "left_battery_level": None, "right_battery_level": None},
+)
+
+# Active-connectable battery is unknown (None) when Active Location is off; passive devices keep last known
+phone_dev_data = {
+    "device_id": "phone1",
+    "name": "Phone",
+    "is_fmm": True,
+    "web_device_type_code": "PHONE",
+    "active_location_requested": False,
+    "_last_battery": {"battery_level": 84},
+}
+check(
+    "phone battery is unknown (None) when Active Location is off",
+    u.resolve_device_battery_value(phone_dev_data, {"battery_level": 84}),
+    None,
+)
+phone_dev_data["active_location_requested"] = True
+check(
+    "phone battery is shown when Active Location is on",
+    u.resolve_device_battery_value(phone_dev_data, {"battery_level": 84}),
+    84,
+)
+
+tablet_dev_data = {
+    "device_id": "tab1",
+    "name": "Tablet",
+    "is_fmm": True,
+    "web_device_type_code": "TABLET",
+    "active_location_requested": False,
+    "_last_battery": {"battery_level": 75},
+}
+check(
+    "tablet battery is unknown (None) when Active Location is off",
+    u.resolve_device_battery_value(tablet_dev_data, {"battery_level": 75}),
+    None,
+)
+
+watch_dev_data = {
+    "device_id": "watch1",
+    "name": "Watch",
+    "is_fmm": True,
+    "web_device_type_code": "WATCH",
+    "active_location_requested": False,
+    "_last_battery": {"battery_level": 62},
+}
+check(
+    "watch battery keeps last known value even with Active Location off",
+    u.resolve_device_battery_value(watch_dev_data, {"battery_level": None}),
+    62,
+)
+
+buds_dev_data = {
+    "device_id": "buds1",
+    "name": "Buds",
+    "is_fmm": True,
+    "is_buds": True,
+    "web_device_type_code": "BUDS",
+    "active_location_requested": False,
+    "_last_battery": {"left_battery_level": 95, "right_battery_level": 80},
+}
+check(
+    "Buds left battery keeps last known value passively",
+    u.resolve_device_battery_value(buds_dev_data, {}, side="left"),
+    95,
+)
+check(
+    "Buds right battery keeps last known value passively",
+    u.resolve_device_battery_value(buds_dev_data, {}, side="right"),
+    80,
+)
+
 check.finish()

@@ -176,6 +176,8 @@ def _sync_entity_names(hass: HomeAssistant, device_id: str, name: str) -> None:
     expected_names = (
         ("device_tracker", f"stf_device_tracker_{device_id}", name),
         ("sensor", f"stf_device_battery_{device_id}", f"{name} Battery"),
+        ("sensor", f"stf_device_battery_left_{device_id}", f"{name} Left Battery"),
+        ("sensor", f"stf_device_battery_right_{device_id}", f"{name} Right Battery"),
         ("sensor", f"stf_device_location_{device_id}", f"{name} Location"),
         ("sensor", f"stf_device_maps_link_{device_id}", f"{name} Maps Link"),
         ("binary_sensor", f"stf_power_saving_{device_id}", f"{name} Power Saving"),
@@ -2121,6 +2123,14 @@ def is_watch_device(dev_data: dict) -> bool:
     return "WATCH" in code or "WATCH" in sub_type or icon.endswith("/watch.svg")
 
 
+def is_buds_device(dev_data: dict) -> bool:
+    if not dev_data.get("is_fmm"):
+        return False
+    code = _device_type_code(dev_data)
+    sub_type = str(dev_data.get("web_sub_type") or "").upper()
+    return bool(dev_data.get("is_buds") or "BUD" in code or "BUD" in sub_type)
+
+
 def is_active_connectable_device(dev_data: dict) -> bool:
     """Devices with a network connection of their own that Samsung can actually reach
     (phones, tablets, PCs). Passive FMM devices (Buds, watches) and tags are excluded: they
@@ -2139,7 +2149,8 @@ _STRUCT_BLOCKED_KEY = re.compile(
 )
 _STRUCT_VALUE_KEY = re.compile(
     r"conn|net|online|offline|wifi|wi_fi|cell|mobile|state|status|type|result|code|sts|support|"
-    r"mode|ring|cdma|tel|only|remotecontrol|config|paired|encrypted|firstshownloc|flag",
+    r"mode|ring|cdma|tel|only|remotecontrol|config|paired|encrypted|firstshownloc|flag|"
+    r"battery|left|right",
     re.I,
 )
 
@@ -2308,6 +2319,12 @@ async def check_fmm_connection(
         elif reason != "501":
             state, source = "offline", "operation_result"
     structure = sanitize_structure(op) if isinstance(op, dict) else None
+    if isinstance(op, dict):
+        live_batt = extract_fmm_battery([op])
+        last_batt = dev_data.setdefault("_last_battery", {})
+        for b_key, b_val in live_batt.items():
+            if b_val is not None:
+                last_batt[b_key] = b_val
     result = {
         "state": state,
         "source_field": source,
@@ -2778,9 +2795,23 @@ async def get_fmm_device_location(
             used_op.get("oprnType") if isinstance(used_op, dict) else None,
         )
 
-        # No battery_level here: DeviceBatterySensor is only created for trackers
-        # (sensor.py) since FMM battery data has the same background-wake unreliability
-        # as location, so we don't bother parsing CHECK_CONNECTION operations for it.
+        # Extract battery level (and Left/Right earbud channels for Galaxy Buds, per
+        # charlesbel/samsung-re-find PR #2: extra.left.battery / extra.right.battery).
+        # For active-connectable devices (smartphones, tablets, PCs), passive reads do not
+        # refresh the battery on Samsung's backend, so battery is only updated/exposed when
+        # active reading is enabled (`active_location_requested` / `active_location_attempted`);
+        # without active reading, their battery sensor stays `unknown` (None).
+        # For passive FMM devices (watches, Buds), the last known battery is always preserved.
+        last_battery = dev_data.setdefault("_last_battery", {})
+        active_connectable = is_active_connectable_device(dev_data)
+        if not active_connectable or active_location_attempted:
+            extracted_battery = extract_fmm_battery(operations)
+            for b_key, b_val in extracted_battery.items():
+                if b_val is not None:
+                    last_battery[b_key] = b_val
+        expose_battery = (not active_connectable) or bool(
+            dev_data.get("active_location_requested") or active_location_attempted
+        )
 
         # A device that can't be actively woken up (no network of its own - buds, most
         # watches, PCs when off/asleep) can only ever show whatever it last reported on
@@ -2876,6 +2907,9 @@ async def get_fmm_device_location(
             "used_loc": used_loc or {
                 "latitude": None, "longitude": None, "gps_accuracy": None, "gps_date": None
             },
+            "battery_level": last_battery.get("battery_level") if expose_battery else None,
+            "left_battery_level": last_battery.get("left_battery_level"),
+            "right_battery_level": last_battery.get("right_battery_level"),
             "raw_item": used_op,
             "web_capabilities": web_capabilities,
             "active_location_supported": active_location_supported,
@@ -3063,19 +3097,11 @@ async def get_device_location(hass: HomeAssistant, session: aiohttp.ClientSessio
             battery_raw = geo.get("battery")
             if battery_raw is None:
                 battery_raw = geo.get("batteryLevel")
-            if battery_raw is not None:
-                if isinstance(battery_raw, str):
-                    battery_level = BATTERY_LEVELS.get(battery_raw, None)
-                    if battery_level is None:
-                        try:
-                            battery_level = int(battery_raw)
-                        except ValueError:
-                            battery_level = None
-                else:
-                    try:
-                        battery_level = int(battery_raw)
-                    except (TypeError, ValueError):
-                        battery_level = None
+            battery_level = parse_battery_value(battery_raw)
+            if battery_level is not None:
+                dev_data.setdefault("_last_battery", {})["battery_level"] = battery_level
+            else:
+                battery_level = dev_data.get("_last_battery", {}).get("battery_level")
 
         return {
             "dev_name": dev_name,
@@ -3249,29 +3275,118 @@ def parse_stf_date(datestr: str) -> datetime:
     return datetime.strptime(datestr, "%Y%m%d%H%M%S").replace(tzinfo=pytz.UTC)
 
 
-def get_battery_level(dev_name: str, ops: list) -> int:
-    """
-    Try to extract the device battery level from the received operation
+def parse_battery_value(raw) -> int | None:
+    """Parse a battery value from Samsung's FMM or SmartTag payloads into 0..100."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, str):
+        cleaned = raw.strip().upper()
+        if not cleaned:
+            return None
+        if cleaned in BATTERY_LEVELS:
+            return BATTERY_LEVELS[cleaned]
+        try:
+            val = int(cleaned)
+        except ValueError:
+            try:
+                val = int(float(cleaned))
+            except ValueError:
+                return None
+    elif isinstance(raw, (int, float)):
+        val = int(raw)
+    else:
+        return None
+    return val if 0 <= val <= 100 else None
 
-    Args:
-        dev_name (str): The name of the device.
-        ops (list): List of operations from the API.
 
-    Returns:
-        int: The battery level if found, None otherwise.
+def extract_fmm_battery(operations: list | None) -> dict[str, int | None]:
+    """Extract general and earbud (Left/Right) battery levels from FMM operations.
+
+    Matches charlesbel/samsung-re-find PR #2:
+      - General battery: `op['battery']`, `op['battery_percent']`, `op['extra']['battery']`,
+        or `op['encLocation']['battery']`.
+      - Earbud channels (Galaxy Buds): `op['extra']['left']['battery']` and
+        `op['extra']['right']['battery']`.
     """
-    for op in ops:
-        if op['oprnType'] == 'CHECK_CONNECTION' and 'battery' in op:
-            batt_raw = op['battery']
-            batt = BATTERY_LEVELS.get(batt_raw, None)
-            if batt is None:
-                try:
-                    batt = int(batt_raw)
-                except ValueError:
-                    _LOGGER.warn(
-                        f"[{dev_name}]: Received invalid battery level: {batt_raw}")
-            return batt
-    return None
+    result: dict[str, int | None] = {
+        "battery_level": None,
+        "left_battery_level": None,
+        "right_battery_level": None,
+    }
+    if not isinstance(operations, list):
+        return result
+
+    priority_order = {
+        "CHECK_CONNECTION": 0,
+        "RING": 1,
+        "LOCATION": 2,
+        "LASTLOC": 3,
+        "OFFLINE_LOC": 4,
+    }
+    valid_ops = [op for op in operations if isinstance(op, dict)]
+    valid_ops.sort(
+        key=lambda op: (
+            priority_order.get(str(op.get("oprnType") or "").upper(), 99),
+            str(op.get("oprnDoneDate") or op.get("oprnCrtDate") or ""),
+        )
+    )
+    for op in valid_ops:
+        extra = op.get("extra") if isinstance(op.get("extra"), dict) else {}
+        enc_loc = op.get("encLocation") if isinstance(op.get("encLocation"), dict) else {}
+
+        if result["battery_level"] is None:
+            for candidate in (
+                op.get("battery"),
+                op.get("battery_percent"),
+                extra.get("battery"),
+                enc_loc.get("battery"),
+            ):
+                parsed = parse_battery_value(candidate)
+                if parsed is not None:
+                    result["battery_level"] = parsed
+                    break
+
+        left = extra.get("left")
+        if result["left_battery_level"] is None and isinstance(left, dict):
+            parsed_left = parse_battery_value(left.get("battery"))
+            if parsed_left is not None:
+                result["left_battery_level"] = parsed_left
+
+        right = extra.get("right")
+        if result["right_battery_level"] is None and isinstance(right, dict):
+            parsed_right = parse_battery_value(right.get("battery"))
+            if parsed_right is not None:
+                result["right_battery_level"] = parsed_right
+
+    return result
+
+
+def resolve_device_battery_value(
+    dev_data: dict, tag_data: dict | None = None, side: str | None = None
+) -> int | None:
+    """Resolve the battery value to display on a sensor.
+
+    - Active-connectable devices (smartphones, tablets, PCs) without Active Location enabled
+      (`active_location_requested` is False) always return `None` (`unknown` in Home Assistant),
+      because passive reads do not refresh battery on Samsung's backend.
+    - Passive devices (watches, Buds, SmartTags) and active-connectable devices with Active
+      Location enabled return the latest reading or the last known value (`_last_battery`).
+    """
+    data = tag_data or {}
+    last_batt = dev_data.get("_last_battery") or {}
+    if side in ("left", "right"):
+        key = f"{side}_battery_level"
+        val = data.get(key)
+        return val if val is not None else last_batt.get(key)
+    if is_active_connectable_device(dev_data) and not dev_data.get("active_location_requested"):
+        return None
+    val = data.get("battery_level")
+    return val if val is not None else last_batt.get("battery_level")
+
+
+def get_battery_level(dev_name: str, ops: list) -> int | None:
+    """Try to extract the device battery level from the received operation list."""
+    return extract_fmm_battery(ops).get("battery_level")
 
 
 

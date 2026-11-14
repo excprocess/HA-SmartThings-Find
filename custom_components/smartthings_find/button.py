@@ -143,6 +143,7 @@ class UpdateLocationButton(ButtonEntity):
             gps_date = used_loc.get('gps_date')
             retrieved_at = tag_data.get('last_location_retrieved_at')
             saved_positions = dict(self.coordinator.saved_positions)
+            last_batt = self.device.get('_last_battery') or {}
             saved_positions[device_id] = {
                 'used_loc': {
                     **used_loc,
@@ -155,6 +156,9 @@ class UpdateLocationButton(ButtonEntity):
                     self.device['_last_new_fix_at'].isoformat()
                     if self.device.get('_last_new_fix_at') else None
                 ),
+                'battery_level': tag_data.get('battery_level', last_batt.get('battery_level')),
+                'left_battery_level': tag_data.get('left_battery_level', last_batt.get('left_battery_level')),
+                'right_battery_level': tag_data.get('right_battery_level', last_batt.get('right_battery_level')),
             }
             try:
                 await self.coordinator.position_store.async_save(saved_positions)

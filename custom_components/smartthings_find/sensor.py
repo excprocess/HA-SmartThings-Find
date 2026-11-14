@@ -10,7 +10,12 @@ from homeassistant.const import EntityCategory
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .utils import google_maps_url, is_active_connectable_device
+from .utils import (
+    google_maps_url,
+    is_active_connectable_device,
+    is_buds_device,
+    resolve_device_battery_value,
+)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -26,13 +31,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     registry = er.async_get(hass)
     entities = []
     for device in devices:
-        # Non-tracker (FMM: phone/wearable) battery only ever reflects whatever the
-        # device last actively reported - same background-wake limitation as location,
-        # confirmed against samsung-re-find's own findings ("battery depends on
-        # device/backend response", no workaround documented) - so it's almost always
-        # stale unless you've just opened the Samsung app yourself. Not worth exposing
-        # as a sensor for these; keep it for trackers, where it's reliable.
-        if device['data'].get("is_tracker"):
+        dev_data = device['data']
+        device_id = dev_data.get('device_id')
+        if is_buds_device(dev_data):
+            # Galaxy Buds report independent Left and Right earbud battery channels in
+            # `extra.left.battery` and `extra.right.battery` (charlesbel/samsung-re-find PR #2).
+            old_batt_id = registry.async_get_entity_id(
+                "sensor", DOMAIN, f"stf_device_battery_{device_id}"
+            )
+            if old_batt_id:
+                registry.async_remove(old_batt_id)
+            entities += [
+                DeviceBudsBatterySensor(hass, coordinator, device, "left"),
+                DeviceBudsBatterySensor(hass, coordinator, device, "right"),
+            ]
+        elif dev_data.get("is_tracker") or dev_data.get("is_fmm"):
             entities += [DeviceBatterySensor(hass, coordinator, device)]
         # DeviceLocationSensor/DeviceMapsLinkSensor are format-agnostic (they just read
         # used_loc/location_found off the coordinator), and get_fmm_device_location now
@@ -64,7 +77,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class DeviceBatterySensor(CoordinatorEntity, SensorEntity):
-    """Representation of a Device battery sensor."""
+    """Representation of a Device battery sensor (SmartTags and non-Buds FMM devices)."""
+
+    _attr_native_unit_of_measurement = "%"
 
     def __init__(self, hass: HomeAssistant, coordinator, device):
         """Initialize the sensor."""
@@ -82,29 +97,95 @@ class DeviceBatterySensor(CoordinatorEntity, SensorEntity):
         self._attr_device_class = SensorDeviceClass.BATTERY
         self._attr_state_class = SensorStateClass.MEASUREMENT
 
+    def _current_value(self):
+        data = (self.coordinator.data or {}).get(self.device_id, {}) or {}
+        return resolve_device_battery_value(self.device, data)
+
     @property
     def available(self) -> bool:
-        """
-        Makes the entity show unavailable state if no data was received
-        or there was an error during last update
-        """
-        tag_data = self.coordinator.data.get(self.device_id, {})
+        """Keep the sensor available when the last update succeeded or a saved battery/location is held."""
+        tag_data = (self.coordinator.data or {}).get(self.device_id, {})
         if not tag_data:
-            _LOGGER.info(f"battery sensor: tag_data none for '{self.name}'; rendering state unavailable")
             return False
-        if not tag_data.get('update_success'):
-            _LOGGER.info(f"Last update for battery sensor '{self.name}' failed; rendering state unavailable")
-            return False
-        return True
-    
+        return bool(
+            tag_data.get("update_success")
+            or tag_data.get("location_found")
+            or self._current_value() is not None
+        )
+
     @property
     def unit_of_measurement(self) -> str:
-        return '%'
-    
+        return "%"
+
+    @property
+    def native_value(self):
+        return self._current_value()
+
     @property
     def state(self):
-        data = self.coordinator.data.get(self.device_id, {})
-        return data.get('battery_level')
+        return self._current_value()
+
+
+class DeviceBudsBatterySensor(CoordinatorEntity, SensorEntity):
+    """Left or Right earbud battery sensor for Galaxy Buds (`extra.left.battery` / `extra.right.battery`)."""
+
+    _attr_native_unit_of_measurement = "%"
+
+    def __init__(self, hass: HomeAssistant, coordinator, device, side: str):
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        self._side = "left" if str(side).lower() == "left" else "right"
+        side_label = "Left" if self._side == "left" else "Right"
+        device_id = device['data'].get("device_id")
+        name = device['data'].get("name") or device_id or "SmartThings Find"
+        self._attr_unique_id = f"stf_device_battery_{self._side}_{device_id}"
+        self._attr_name = f"{name} {side_label} Battery"
+        self._attr_icon = "mdi:earbuds"
+        self.hass = hass
+        self.device = device['data']
+        self.device_id = device_id
+        self._attr_device_info = device['ha_dev_info']
+        self._attr_device_class = SensorDeviceClass.BATTERY
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+
+    def _current_value(self):
+        data = (self.coordinator.data or {}).get(self.device_id, {}) or {}
+        return resolve_device_battery_value(self.device, data, side=self._side)
+
+    @property
+    def available(self) -> bool:
+        tag_data = (self.coordinator.data or {}).get(self.device_id, {})
+        if not tag_data:
+            return False
+        return bool(
+            tag_data.get("update_success")
+            or tag_data.get("location_found")
+            or self._current_value() is not None
+        )
+
+    @property
+    def unit_of_measurement(self) -> str:
+        return "%"
+
+    @property
+    def native_value(self):
+        return self._current_value()
+
+    @property
+    def state(self):
+        return self._current_value()
+
+    @property
+    def extra_state_attributes(self):
+        data = (self.coordinator.data or {}).get(self.device_id, {}) or {}
+        last_batt = self.device.get("_last_battery") or {}
+        combined = data.get("battery_level")
+        if combined is None:
+            combined = last_batt.get("battery_level")
+        attrs = {"earbud_side": self._side}
+        if combined is not None:
+            attrs["combined_battery_level"] = combined
+        return attrs
 
 
 class DeviceLocationSensor(CoordinatorEntity, SensorEntity):

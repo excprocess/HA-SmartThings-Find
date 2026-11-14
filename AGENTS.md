@@ -29,7 +29,7 @@ Updated 2026-11-14. Read this before changing the integration; it captures the u
 - **`diagnostics.py`** should redact access/refresh tokens, account identifiers, and coordinates. Recheck redaction whenever new fields are added. Diagnostics should inspect already-held data and must not make extra Samsung requests.
 - Device/entity names imported from Samsung are synchronized during setup only when the user has not customized them; a Samsung rename may therefore need an integration reload to appear.
 - SmartTag Ring and FMM Ring are optimistic controls because the APIs do not report actual ring state. The documented FMM Ring support is phones only. The power-saving mode exposed for SmartTags is read-only; prior investigation found no confirmed write route, so do not present it as a controllable switch.
-- `sensor.py` includes battery reporting for SmartTags; FMM battery readings are omitted because Samsung only reports them when the device answers and the value is often stale. The Maps Link also updates the device registry's configuration URL only when the URL changes.
+- `sensor.py` includes battery reporting for SmartTags and Find My Mobile devices (`DeviceBatterySensor`), and dedicated Left/Right earbud battery sensors for Galaxy Buds (`DeviceBudsBatterySensor` reading `extra.left.battery` and `extra.right.battery`, per `charlesbel/samsung-re-find` PR #2). For active-connectable devices (`is_active_connectable_device`: smartphones, tablets, PCs), battery is reported only while Active Location is enabled (`active_location_requested`), and renders as `unknown` (`None`) when Active Location is off because passive reads do not refresh battery on Samsung's backend. For passive devices (watches, Buds, SmartTags), the last known battery is preserved across polls and restarts (`_last_battery` / `saved_positions`). The Maps Link also updates the device registry's configuration URL only when the URL changes.
 - Entity photo is intentional on the device tracker, but action switches/buttons should use their own icons rather than the device photo. This avoids the photo masking Ring/Update Location controls in Home Assistant.
 
 ### CI and local validation
@@ -122,6 +122,7 @@ The following is the history of behavior decisions/fixes in the current GitHub c
   - `perform_fmm_operation` enforces `ALLOWED_FMM_OPERATIONS` (`CHECK_CONNECTION`, `LOCATION`, `RING`, `TRACK_LOCATION_START`, `TRACK_LOCATION_STOP`) and uses `classify_fmm_operation_result` (`1000`/`1100`/`2100` pending vs `2800`+`1200` success vs terminal failure).
   - Passive `setLastSelect.do` reads also seed `dev_data['_connection']` from any returned `CHECK_CONNECTION` operation when no live check has run yet.
   - `hass.data[DOMAIN][entry.entry_id]` stores `devices` and `session` **before** `coordinator.async_config_entry_first_refresh()` so any session refresh during the initial poll re-resolves `web_dvce_id` for all devices (preventing cascading HTTP 404s).
+  - Re-enabled FMM battery (`DeviceBatterySensor`) and added differentiated Left/Right earbud battery sensors for Galaxy Buds (`DeviceBudsBatterySensor`, `extract_fmm_battery` in `utils.py`, based on `charlesbel/samsung-re-find` PR #2).
 
 ## Known unresolved behavior / next investigation
 

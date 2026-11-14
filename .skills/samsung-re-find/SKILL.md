@@ -62,6 +62,14 @@ POST /device/setLastSelect.do
   - Are routinely offline when disconnected from a phone.
   - Never mark their position as `unknown` after failed attempts; always preserve the last known good position.
 
+## Battery & Earbud Left/Right Channels (PR #2)
+
+- `extract_fmm_battery` in `utils.py` extracts:
+  - General battery (`battery_level`) from `op['battery']`, `op['battery_percent']`, `op['extra']['battery']`, or `op['encLocation']['battery']` (supporting numeric strings `0..100` and symbolic `BATTERY_LEVELS`).
+  - Earbud channels (`left_battery_level`, `right_battery_level`) from `op['extra']['left']['battery']` and `op['extra']['right']['battery']`.
+- In `sensor.py`, Galaxy Buds (`is_buds_device`) expose `<name> Left Battery` and `<name> Right Battery` (`DeviceBudsBatterySensor`), while phones, tablets, watches, PCs, and SmartTags expose `<name> Battery` (`DeviceBatterySensor`).
+- For active-connectable devices (`is_active_connectable_device`: phones, tablets, PCs) with Active Location `off`, the battery sensor reports `unknown` (`None`) because passive reads do not update their battery on Samsung's server; for watches, Buds, and SmartTags the last known battery is always retained.
+
 ## Privacy & Sanitized Structure Logging
 
 - Never log or store raw coordinates, device serials/IDs, account IDs, SSIDs, or tokens in FMM request history or structure logs.
