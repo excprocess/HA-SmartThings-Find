@@ -45,6 +45,7 @@ from .utils import (
     get_device_ble_metadata,
     is_active_connectable_device,
     register_position_fix,
+    get_ha_device,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         for device in devices:
             excluded_id = device["data"].get("device_id")
             if excluded_id in excluded_ids:
-                ha_dev = device_reg.async_get_device({(DOMAIN, excluded_id)})
+                ha_dev = get_ha_device(hass, excluded_id)
                 if ha_dev:
                     # Removes the device together with its entities.
                     device_reg.async_remove_device(ha_dev.id)
@@ -221,11 +222,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if restored_data:
         coordinator.data = restored_data
 
-    # This is what makes the whole integration slow to load (around 10-15
-    # seconds for my 15 devices) but it is the right way to do it. Only if
-    # it succeeds, the integration will be marked as successfully loaded.
-    await coordinator.async_config_entry_first_refresh()
-    
+    # Store session and devices BEFORE the first refresh: if the first refresh triggers a
+    # fresh website session bootstrap (e.g. passive_session_refresh), get_web_session_cookie()
+    # looks up hass.data[DOMAIN][entry.entry_id]["devices"] to re-resolve session-scoped
+    # web_dvce_id values for every device.
     hass.data[DOMAIN][entry.entry_id].update({
         "session": session,
         "coordinator": coordinator,
@@ -236,6 +236,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # the former should trigger a full reload.
         "_last_options": dict(entry.options),
     })
+
+    # This is what makes the whole integration slow to load (around 10-15
+    # seconds for my 15 devices) but it is the right way to do it. Only if
+    # it succeeds, the integration will be marked as successfully loaded.
+    await coordinator.async_config_entry_first_refresh()
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 

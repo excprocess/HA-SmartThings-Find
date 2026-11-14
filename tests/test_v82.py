@@ -30,6 +30,8 @@ for label, payload, want in [
     ("online flag", {"isOnline": True}, "online"),
     ("wifi flag", {"wifi": "Y", "online": "Y"}, "wifi"),
     ("capability only is not a state", {"wifiOnly": "Y"}, "unknown"),
+    ("completed CHECK_CONNECTION 1200 is online", {"oprnType": "CHECK_CONNECTION", "oprnStsCd": "2800", "oprnResultCode": "1200"}, "online"),
+    ("completed CHECK_CONNECTION error is offline", {"oprnType": "CHECK_CONNECTION", "oprnStsCd": "2800", "oprnResultCode": "2040"}, "offline"),
     ("nothing readable", {"oprnType": "CHECK_CONNECTION", "battery": "FULL"}, "unknown"),
     ("not a dict", None, "unknown"),
 ]:

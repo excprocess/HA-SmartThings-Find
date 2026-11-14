@@ -110,6 +110,25 @@ def format_ring_error(err: str | None) -> str:
         return f"Ring failed: {err}"
     return f"Ring failed: {err}"
 
+def get_ha_device(hass: HomeAssistant, device_id: str):
+    """Look up a device in the Home Assistant device registry without triggering the
+    2027.8 deprecation warning on async_get_device(identifiers=...)."""
+    registry = device_registry.async_get(hass)
+    identifier = (DOMAIN, device_id)
+    get_by_id = getattr(registry, "async_get_device_by_identifier", None)
+    if callable(get_by_id):
+        try:
+            return get_by_id(identifier)
+        except TypeError:
+            pass
+    devices = getattr(registry, "devices", None)
+    if isinstance(devices, dict):
+        for dev in devices.values():
+            if identifier in getattr(dev, "identifiers", set()):
+                return dev
+    return registry.async_get_device(identifiers={identifier})
+
+
 def _sync_entity_names(hass: HomeAssistant, device_id: str, name: str) -> None:
     """Follow a rename made in the Samsung app through to the entity names.
 
@@ -1722,7 +1741,7 @@ async def get_devices(hass: HomeAssistant, session: aiohttp.ClientSession, entry
         )
         identifier = (DOMAIN, device_id)
         registry = device_registry.async_get(hass)
-        ha_dev = registry.async_get_device({identifier})
+        ha_dev = get_ha_device(hass, device_id)
         if ha_dev and ha_dev.disabled:
              _LOGGER.debug(
                 f"Ignoring disabled device: '{name}' (disabled by {ha_dev.disabled_by})")
@@ -1978,13 +1997,13 @@ def is_active_connectable_device(dev_data: dict) -> bool:
 # with its value type, and the value itself only for short, status-like fields that cannot
 # identify a person, a place, or a session.
 _STRUCT_BLOCKED_KEY = re.compile(
-    r"lat|lon|coord|loc|addr|ssid|ip$|^ip|mac|imei|phone|number|name|mail|token|id$|^id|user|usr|"
-    r"session|csrf|cookie|key|uncertain|serial|msisdn|iccid|imsi",
+    r"lat|lon|coord|(?<!firstshown)loc(?!ationtype)|addr|ssid|ip$|^ip|mac|imei|phone|number|name|"
+    r"mail|token|id$|^id|user|usr|session|csrf|cookie|key|uncertain|serial|msisdn|iccid|imsi",
     re.I,
 )
 _STRUCT_VALUE_KEY = re.compile(
     r"conn|net|online|offline|wifi|wi_fi|cell|mobile|state|status|type|result|code|sts|support|"
-    r"mode|ring|cdma|tel|only",
+    r"mode|ring|cdma|tel|only|remotecontrol|config|paired|encrypted|firstshownloc|flag",
     re.I,
 )
 
@@ -2078,6 +2097,15 @@ def parse_connection_state(op: dict | None) -> tuple[str, str | None]:
         for state, source in found:
             if state == wanted:
                 return state, source
+    # Samsung's real CHECK_CONNECTION operation uses oprnStsCd='2800' (completed) and
+    # oprnResultCode='1200' when the device answered the check, or another result code when
+    # the device could not be reached.
+    if op.get("oprnType") == "CHECK_CONNECTION" and str(op.get("oprnStsCd") or "") == "2800":
+        result_code = str(op.get("oprnResultCode") or "")
+        if result_code == "1200":
+            return "online", "oprnResultCode"
+        if result_code and result_code not in {"00", "200"}:
+            return "offline", "oprnResultCode"
     return "unknown", None
 
 
@@ -2121,6 +2149,14 @@ async def check_fmm_connection(
         _LOGGER.debug("[%s] CHECK_CONNECTION raised", dev_name, exc_info=True)
     op = sink.get("operation")
     state, source = parse_connection_state(op)
+    if state == "unknown" and sink.get("samsung_side"):
+        # Samsung accepted our live CHECK_CONNECTION request for this device: if it completed
+        # with 1200 the device answered (online); if it timed out or finished with a non-success
+        # code, the device did not answer the connection check (offline).
+        if success:
+            state, source = "online", "operation_result"
+        elif reason != "501":
+            state, source = "offline", "operation_result"
     structure = sanitize_structure(op) if isinstance(op, dict) else None
     result = {
         "state": state,
@@ -2990,7 +3026,7 @@ def update_device_maps_link(hass: HomeAssistant, device_id: str, used_loc: dict 
     if not url:
         return
     registry = device_registry.async_get(hass)
-    ha_dev = registry.async_get_device(identifiers={(DOMAIN, device_id)})
+    ha_dev = get_ha_device(hass, device_id)
     if not ha_dev or ha_dev.configuration_url == url:
         return
     registry.async_update_device(ha_dev.id, configuration_url=url)
