@@ -20,12 +20,18 @@ This project is a fork in a long chain: [Vedeneb/HA-SmartThings-Find](https://gi
 login rework from [PixelShober/HA-SmartThings-Find](https://github.com/PixelShober/HA-SmartThings-Find).
 See [Credits](#credits) for everything this fork builds on.
 
+## What's new in 8.3
+
+- **Battery sensors re-enabled for Find My Mobile devices & differentiated Left/Right Battery for Galaxy Buds**:
+  - Separate `<name> Left Battery` and `<name> Right Battery` sensors for Galaxy Buds (`extra.left.battery` and `extra.right.battery`), keeping their last known values fixed across passive polls and Home Assistant restarts.
+  - `<name> Battery` sensor for watches (retaining the last known value) and for phones, tablets, and PCs (reporting the battery level while `Active Location` is enabled, and `unknown` when `Active Location` is off since passive reads do not refresh battery on Samsung's server).
+- **Live-verified Connection sensor & session reliability**: refined `wifi`/`mobile`/`online` detection from real `CHECK_CONNECTION` + `LOCATION` payloads, fixed startup HTTP 404s by initializing `getDeviceList.do` on every fresh web session, and added Watch Ring detection for `WEARABLE` (`subType: "WATCH"`) models.
+
 ## What's new in 8.2 (pre-release)
 
 - **Last New Position Request** sensor: when Home Assistant last received a genuinely newer position (native timestamp, survives restarts).
 - **Connection** sensor for phones, tablets and PCs (`wifi` / `mobile` / `online` / `offline` / `unknown`). Its attributes show the sanitized structure of what Samsung returns, so new fields can be spotted. The first version reads Samsung's undocumented answer on a best-effort basis; please share the sanitized structure from the log if it shows `unknown`.
 - **Exclude devices** in the integration options: no polling and no entities for the devices you don't want to track.
-- **Battery for Find My Mobile devices & Left/Right Battery for Galaxy Buds**: battery sensors for phones, tablets, watches and PCs, plus separate `<name> Left Battery` and `<name> Right Battery` sensors for Galaxy Buds.
 - **Ring for watches** (must be online and connected). Phones and watches are checked first and the ring is refused with an *offline* error if Samsung reports the device offline.
 - **Unknown position after N failed attempts** (options, `0` = off): for phones, tablets and PCs with Active Location on, the position is shown as *unknown* after N scheduled active attempts in a row without a genuinely newer fix. Buds, watches and SmartTags always keep their last known position.
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 8.3.0
+
+### Added
+- **Re-enabled battery sensors for Find My Mobile devices (`<name> Battery`)**: battery percentage is now extracted from Samsung's `CHECK_CONNECTION`, `RING`, `LOCATION`, `LASTLOC`, and `OFFLINE_LOC` operations for phones, tablets, watches, and PCs.
+- **Differentiated Left / Right earbud battery sensors for Galaxy Buds (`<name> Left Battery` and `<name> Right Battery`)**: reads the independent earbud channels `extra.left.battery` and `extra.right.battery` from Samsung's FMM payload (based on `charlesbel/samsung-re-find` PR #2). Any legacy single battery entity for a Buds device is removed automatically on setup.
+- **Persistent last-known battery for Galaxy Buds, watches, and SmartTags**: passive devices cannot be woken remotely when disconnected from a phone; their last known battery values (`battery_level`, `left_battery_level`, `right_battery_level`) remain fixed and are persisted across polls and Home Assistant restarts instead of dropping to `unknown` when a cycle omits battery data.
+- **Samsung Account master-token fallback (`_reissue_token_from_master`)**: when a rotating `refresh_token` is rejected (e.g. after a disrupted save), the integration automatically attempts to re-issue tokens using the stored `user_auth_token` before triggering a Home Assistant reauthentication flow.
+
+### Changed
+- **Active-connectable device battery policy (smartphones, tablets, PCs)**: because Samsung's backend does not update battery during passive reads, the `<name> Battery` sensor for phones, tablets, and PCs reports `unknown` whenever the device's `Active Location` switch is off, and displays the battery level only when `Active Location` is enabled.
+- **Live-verified `Connection` state parser**: updated `parse_connection_state` against real `S23 Ultra` and Windows PC responses to combine `CHECK_CONNECTION` (`extra.isConnected`, `oprnStsCd == "2800"` + `oprnResultCode == "1200"`) with `LOCATION`'s `extra.seData.netType` (`wifi` / `mobile`), and seed initial state from passive `setLastSelect.do` reads.
+
+### Fixed
+- **Eliminated startup HTTP 404 cascade on `setLastSelect.do`**: stored `devices` and `session` in `hass.data` before `async_config_entry_first_refresh()` and ensured `device/getDeviceList.do` is always called on every new `JSESSIONID` with form-encoded body `data={}` to initialize Samsung's server-side session device table.
+- **Galaxy Watch Ring entity detection**: detected newer watches reported by Samsung as `deviceTypeCode: "WEARABLE"` with `subType: "WATCH"` (e.g. Galaxy Watch 8 Classic).
+- **Home Assistant 2027.8 deprecation**: replaced `device_registry.async_get_device({identifier})` with `async_get_device_by_identifier` (with fallback for older HA versions).
+
 ## 8.2.0 (pre-release)
 
 ### Added
@@ -7,7 +24,6 @@
 - **Connection** sensor (diagnostic) for phones, tablets and PCs: `wifi`, `mobile`, `online`, `offline` or `unknown`, from Samsung's `CHECK_CONNECTION` operation. It is refreshed in the opted-in Active Location cycle (never with the switch off) and before every Ring; `unknown` means the answer could not be read, not that the device is offline. The parser is a best-effort first version: Samsung does not document the payload.
 - **Sanitized server structure.** The shape of what Samsung returns (every key with its value type, values only for short status-like fields; never coordinates, ids, names or session data) is logged at INFO when it changes and exposed in the Connection sensor attributes (`check_connection_structure`, `server_data_structure`), to see what the server provides and to refine the parser.
 - **Exclude devices** option: selected devices get no polling, no Samsung requests and no entities (existing ones are removed on reload); they can be included again from the same option.
-- **Battery sensors for Find My Mobile devices & Left/Right Battery for Galaxy Buds**: re-enabled battery reporting for FMM devices and added dedicated `<name> Left Battery` and `<name> Right Battery` sensors for Galaxy Buds (`extra.left.battery` and `extra.right.battery`, matching `charlesbel/samsung-re-find` PR #2). For active-connectable devices (phones, tablets, PCs) without Active Location enabled, the battery sensor reports `unknown` because passive reads do not update battery on Samsung's side; for watches, Buds and SmartTags the last known battery is always preserved.
 - **Ring for watches** (Samsung requires the watch to be online and connected).
 - **Unknown position after N failed attempts** option (0 = off). For phones, tablets and PCs with Active Location on, N scheduled active attempts in a row that Samsung answered without bringing a genuinely newer fix make the tracker and location sensors show *unknown*. Local session/HTTP errors and manual presses are not counted; a genuine new fix restores the position immediately. The last position stays stored. Buds, watches, SmartTags and devices with the switch off always keep their last known position.
 
