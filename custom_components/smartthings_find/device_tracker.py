@@ -177,6 +177,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
             "web_dvce_id",
             "web_usr_id",
             "web_device_type_code",
+            "web_sub_type",
             "used_loc",
             "latitude",
             "longitude",

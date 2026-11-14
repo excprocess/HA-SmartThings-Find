@@ -342,10 +342,15 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         if not dev_data.get('is_fmm'):
             return False
         device_type = str(dev_data.get('web_device_type_code') or '').upper()
+        sub_type = str(dev_data.get('web_sub_type') or '').upper()
+        icon = str(dev_data.get('icon_url') or '').lower()
         return bool(
             dev_data.get('is_buds')
             or 'BUD' in device_type
+            or 'BUD' in sub_type
             or 'WATCH' in device_type
+            or 'WATCH' in sub_type
+            or icon.endswith('/watch.svg')
             or device_type in {'PC', 'PC DEVICE', 'WINDOWS_PC', 'PERSONAL_COMPUTER'}
             or 'COMPUTER' in device_type
             or 'LAPTOP' in device_type

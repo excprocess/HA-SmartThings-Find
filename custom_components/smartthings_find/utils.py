@@ -38,6 +38,39 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 FMM_LOCATION_POLL_SECONDS = 60
 FMM_CONNECTION_POLL_SECONDS = 20
+ALLOWED_FMM_OPERATIONS = frozenset({
+    "CHECK_CONNECTION",
+    "LOCATION",
+    "RING",
+    "TRACK_LOCATION_START",
+    "TRACK_LOCATION_STOP",
+})
+PENDING_OPERATION_STATUS_CODES = frozenset({
+    "1000", "1100", "2100", "PENDING", "IN_PROGRESS", "RUNNING",
+})
+
+
+def classify_fmm_operation_result(op: dict | None, default_operation: str = "") -> str:
+    """Classify a Samsung FMM operation entry as 'success', 'pending', or 'failed'
+    (ported from samsung-re-find's _sanitize_operation contract)."""
+    if not isinstance(op, dict):
+        return "pending"
+    status_raw = op.get("status_code") or op.get("oprnStsCd") or op.get("statusCode")
+    result_raw = op.get("result_code") or op.get("oprnResultCode") or op.get("resultCode")
+    status_code = str(status_raw) if status_raw is not None else ""
+    result_code = str(result_raw) if result_raw is not None else ""
+    op_type = str(op.get("oprnType") or op.get("type") or default_operation)
+    if (
+        (op_type == "TRACK_LOCATION_START" and status_code == "2100")
+        or (status_code == "2800" and result_code == "1200")
+        or status_code in {"200", "SUCCESS", "00"}
+    ):
+        return "success"
+    if status_code in PENDING_OPERATION_STATUS_CODES:
+        return "pending"
+    if status_code:
+        return "failed"
+    return "pending"
 
 URL_ENTRY_POINT = 'https://account.samsung.com/accounts/ANDROIDSDK/getEntryPoint'
 SMARTTHINGS_APP_VERSION = "1.8.21.28"
@@ -907,41 +940,113 @@ async def do_login_stage_two(
 
 
 
+async def _reissue_token_from_master(
+    session: aiohttp.ClientSession,
+    auth_server_url: str,
+    user_auth_token: str,
+    device_id: str,
+    login_id: str | None,
+    client_id: str,
+    scope: str,
+) -> dict | None:
+    """Reissue a Find/IoT token pair from the persistent master userauth_token when a
+    rotating refresh_token has expired or been invalidated (ported from samsung-re-find)."""
+    if not auth_server_url or not user_auth_token or not device_id:
+        return None
+    verifier = generate_code_verifier()
+    challenge = generate_code_challenge(verifier)
+    params = {
+        "response_type": "code",
+        "serviceType": "M",
+        "client_id": client_id,
+        "code_challenge_method": "S256",
+        "childAccountSupported": "Y",
+        "userauth_token": user_auth_token,
+        "code_challenge": challenge,
+        "physical_address_text": device_id,
+        "scope": scope,
+    }
+    if login_id:
+        params["login_id"] = login_id
+    async with session.get(f"{auth_server_url}/auth/oauth2/v2/authorize", params=params) as res:
+        if res.status != 200:
+            return None
+        auth_data = await res.json(content_type=None)
+    code = auth_data.get("code") if isinstance(auth_data, dict) else None
+    if not code and isinstance(auth_data, dict) and auth_data.get("privacyAccepted") == "N" and "login_id" in params:
+        params.pop("login_id", None)
+        async with session.get(f"{auth_server_url}/auth/oauth2/v2/authorize", params=params) as res:
+            if res.status != 200:
+                return None
+            auth_data = await res.json(content_type=None)
+        code = auth_data.get("code") if isinstance(auth_data, dict) else None
+    if not code:
+        return None
+    async with session.post(
+        f"{auth_server_url}/auth/oauth2/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": client_id,
+            "code": code,
+            "code_verifier": verifier,
+            "physical_address_text": device_id,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    ) as res:
+        if res.status != 200:
+            return None
+        return await res.json(content_type=None)
+
+
 async def _refresh_token(
     hass: HomeAssistant,
     session: aiohttp.ClientSession,
     entry_id: str,
     refresh_token_key: str,
     access_token_key: str,
-    client_id: str
+    client_id: str,
+    scope: str = SCOPE_FIND,
 ) -> str:
-    """Refreshes the access token using the given refresh token key."""
+    """Refreshes the access token using the given refresh token key, falling back to
+    reissuing from the master userauth_token if the refresh token has expired."""
     data_store = hass.data[DOMAIN][entry_id]
     refresh_token = data_store.get(refresh_token_key)
     auth_server_url = data_store.get(CONF_AUTH_SERVER_URL)
 
-    if not refresh_token or not auth_server_url:
-        raise ConfigEntryAuthFailed("Refresh token or Auth URL missing")
+    if not auth_server_url:
+        raise ConfigEntryAuthFailed("Auth URL missing")
 
     try:
-        url = f"{auth_server_url}/auth/oauth2/token"
-        payload = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id
-        }
-        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+        data = None
+        if refresh_token:
+            url = f"{auth_server_url}/auth/oauth2/token"
+            payload = {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id
+            }
+            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
 
-        async with session.post(url, data=payload, headers=headers) as res:
-            if res.status != 200:
-                _LOGGER.error(
-                    "Token refresh failed: %s - %s",
-                    res.status,
-                    _mask_secret(await res.text(), keep=40)
-                )
-                raise ConfigEntryAuthFailed("Token refresh failed")
-
-            data = await res.json()
+            async with session.post(url, data=payload, headers=headers) as res:
+                if res.status == 200:
+                    data = await res.json()
+                else:
+                    _LOGGER.warning(
+                        "Token refresh failed (HTTP %s for %s), attempting master-token reissue",
+                        res.status, access_token_key,
+                    )
+        if not data or not data.get("access_token") or not data.get("refresh_token"):
+            data = await _reissue_token_from_master(
+                session,
+                auth_server_url,
+                data_store.get(CONF_USER_AUTH_TOKEN),
+                data_store.get(CONF_DEVICE_ID),
+                data_store.get(CONF_LOGIN_ID),
+                client_id,
+                scope,
+            )
+            if not data:
+                raise ConfigEntryAuthFailed("Token refresh and master-token reissue both failed")
 
         new_access_token = data.get('access_token')
         new_refresh_token = data.get('refresh_token')
@@ -994,7 +1099,8 @@ async def refresh_iot_token(
         entry_id,
         CONF_IOT_REFRESH_TOKEN,
         CONF_IOT_ACCESS_TOKEN,
-        CLIENT_ID_ONECONNECT
+        CLIENT_ID_ONECONNECT,
+        WEB_FIND_SCOPE,
     )
 
 
@@ -1066,8 +1172,8 @@ def _record_fmm_request(
         # and skipped operations are diagnostic events, not API calls.
         "api_call": endpoint in {
             "authorize", "authorize_retry", "getState.do", "login.do",
-            "chkLogin.do", "setLastSelect.do", "addOperation.do",
-            "getOperationResult.do",
+            "chkLogin.do", "getDeviceList.do", "setLastSelect.do",
+            "addOperation.do", "getOperationResult.do",
         } and outcome != "skipped",
     }
     if details:
@@ -1497,8 +1603,9 @@ async def get_web_session_cookie(
         # under). Re-resolve them now, under this session, before anything uses them.
         try:
             all_devices = [d["data"] for d in data_store.get("devices", [])]
-            if all_devices:
-                await enrich_devices_with_web_metadata(hass, session, entry_id, all_devices)
+            await enrich_devices_with_web_metadata(
+                hass, session, entry_id, all_devices, request_history=request_history
+            )
         except Exception as e:
             _LOGGER.debug("[diag] Web session bridge: re-enrichment after fresh bootstrap raised: %s", e, exc_info=True)
 
@@ -1569,6 +1676,7 @@ async def enrich_devices_with_web_metadata(
     session: aiohttp.ClientSession,
     entry_id: str,
     all_devices: list,
+    request_history: list | None = None,
 ) -> None:
     """Cross-reference every device (tags included) against the website's own device
     list (device/getDeviceList.do), matched by name, for two purposes:
@@ -1582,8 +1690,10 @@ async def enrich_devices_with_web_metadata(
     simply left without web ids/icons (FMM devices fall back to 'location not found';
     devices keep whatever icon_url, if any, they already had).
     """
-    if not all_devices:
-        return
+    # Always call getDeviceList.do on the current web session, even if all_devices is
+    # empty: Samsung's web backend populates the session's device table during
+    # getDeviceList.do, and subsequent setLastSelect.do calls return HTTP 404 unless
+    # getDeviceList.do has run in that JSESSIONID.
     jsessionid, csrf = await get_web_session_cookie(hass, session, entry_id)
     if not jsessionid or not csrf:
         _LOGGER.debug("[diag] Skipping web metadata enrichment: no web session available")
@@ -1594,6 +1704,8 @@ async def enrich_devices_with_web_metadata(
         async with web_client.post(
             "https://smartthingsfind.samsung.com/device/getDeviceList.do",
             params={"_csrf": csrf},
+            data={},
+            headers={"Accept": "application/json"},
             cookies={"JSESSIONID": jsessionid},
         ) as res:
             status = res.status
@@ -1602,6 +1714,16 @@ async def enrich_devices_with_web_metadata(
         _LOGGER.debug("[diag] Web getDeviceList.do raised: %s", e, exc_info=True)
         return
 
+    _record_fmm_request(
+        request_history,
+        "getDeviceList.do",
+        http_status=status,
+        result_code=body.get("resultCode") if isinstance(body, dict) else None,
+        outcome="success" if status == 200 and isinstance(body, dict) else "http_error",
+        details={
+            "device_count": len(body.get("deviceList", [])) if isinstance(body, dict) else 0,
+        },
+    )
     if status != 200 or not isinstance(body, dict):
         _LOGGER.debug("[diag] Web getDeviceList.do failed: http_status=%s", status)
         return
@@ -1617,8 +1739,8 @@ async def enrich_devices_with_web_metadata(
             by_name.setdefault(wname, wd)
 
     for dev in all_devices:
-        name = (dev.get("name") or "").casefold()
-        match = by_name.get(name)
+        name = (dev.get("original_name") or dev.get("name") or "").casefold()
+        match = by_name.get(name) or by_name.get((dev.get("name") or "").casefold())
         if not match:
             _LOGGER.debug("[%s] No matching website device found", dev.get("name"))
             continue
@@ -1634,7 +1756,8 @@ async def enrich_devices_with_web_metadata(
         # PHONE is the only deviceTypeCode the website itself exposes a Ring button for
         # (confirmed against the real site - PC/watch/buds have no ring UI there either).
         dev["web_device_type_code"] = str(match.get("deviceTypeCode") or "").upper()
-        dev["is_buds"] = dev["web_device_type_code"] == "BUDS"
+        dev["web_sub_type"] = str(match.get("subType") or "").upper()
+        dev["is_buds"] = dev["web_device_type_code"] == "BUDS" or "BUD" in dev["web_sub_type"]
 
         if dev.get("is_fmm"):
             _LOGGER.debug(
@@ -1822,6 +1945,9 @@ async def perform_fmm_operation(
     Samsung explicitly rejected or failed the request, useful for surfacing a clear
     error to the user (e.g. via a button press), or None on a plain timeout/no-response.
     """
+    if type(operation) is not str or operation not in ALLOWED_FMM_OPERATIONS:
+        _LOGGER.error("Refusing disallowed FMM operation: %r", operation)
+        return False, "disallowed_operation"
     dev_name = dev_data.get("name") or "SmartThings Find"
     web_dvce_id = dev_data.get("web_dvce_id")
     web_usr_id = dev_data.get("web_usr_id")
@@ -1913,26 +2039,31 @@ async def perform_fmm_operation(
             ]
             if candidates:
                 latest = candidates[-1]
+                op_state = classify_fmm_operation_result(latest, operation)
                 if isinstance(result_sink, dict):
                     result_sink["operation"] = latest
+                    result_sink["operation_state"] = op_state
                 _record_fmm_request(
                     request_history,
                     "getOperationResult.do",
                     http_status=res.status,
                     result_code=latest.get("oprnResultCode"),
-                    outcome="completed" if latest.get("oprnStsCd") == "2800" else "pending",
+                    outcome="completed" if op_state in {"success", "failed"} else "pending",
                     details={
                         "operation": operation,
                         "operation_status": latest.get("oprnStsCd"),
+                        "operation_result": op_state,
                     },
                 )
-                if latest.get("oprnStsCd") == "2800":
-                    success = latest.get("oprnResultCode") == "1200"
+                if op_state in {"success", "failed"}:
+                    success = op_state == "success"
+                    reject_code = latest.get("oprnResultCode") or latest.get("oprnStsCd")
                     _LOGGER.debug(
-                        "[%s] %s %s (oprnResultCode=%s)",
-                        dev_name, operation, "succeeded" if success else "failed", latest.get("oprnResultCode"),
+                        "[%s] %s %s (oprnStsCd=%s oprnResultCode=%s)",
+                        dev_name, operation, "succeeded" if success else "failed",
+                        latest.get("oprnStsCd"), latest.get("oprnResultCode"),
                     )
-                    return success, (None if success else latest.get("oprnResultCode"))
+                    return success, (None if success else str(reject_code) if reject_code is not None else None)
             else:
                 _record_fmm_request(
                     request_history,
@@ -1976,13 +2107,18 @@ def is_pc_device(dev_data: dict) -> bool:
 
 
 def is_phone_device(dev_data: dict) -> bool:
-    """Phones and tablets: both can be reached actively and rung."""
+    """Phones and tablets: both can be reached actively and rung (`TAB` / `TABLET`)."""
     code = _device_type_code(dev_data)
-    return bool(dev_data.get("is_fmm") and ("PHONE" in code or "TABLET" in code))
+    return bool(dev_data.get("is_fmm") and ("PHONE" in code or "TAB" in code))
 
 
 def is_watch_device(dev_data: dict) -> bool:
-    return bool(dev_data.get("is_fmm") and "WATCH" in _device_type_code(dev_data))
+    if not dev_data.get("is_fmm"):
+        return False
+    code = _device_type_code(dev_data)
+    sub_type = str(dev_data.get("web_sub_type") or "").upper()
+    icon = str(dev_data.get("icon_url") or "").lower()
+    return "WATCH" in code or "WATCH" in sub_type or icon.endswith("/watch.svg")
 
 
 def is_active_connectable_device(dev_data: dict) -> bool:
@@ -2044,14 +2180,17 @@ _FALSE_VALUES = {"n", "no", "false", "0", "off", "offline", "disconnected", "non
 _MOBILE_HINTS = ("mobile", "cell", "lte", "3g", "4g", "5g", "data", "gsm", "umts")
 
 
-def parse_connection_state(op: dict | None) -> tuple[str, str | None]:
-    """Best-effort reading of a CHECK_CONNECTION operation.
+def parse_connection_state(
+    op: dict | None, fallback_op: dict | None = None
+) -> tuple[str, str | None]:
+    """Read a CHECK_CONNECTION operation (and optionally the accompanying LOCATION operation's
+    extra.seData.netType) to return ('wifi'|'mobile'|'online'|'offline'|'unknown', field_name).
 
-    The real payload is not documented, so this only looks at fields whose *names* talk about
-    connection/network/online/wifi/mobile, and returns ('wifi'|'mobile'|'online'|'offline'|
-    'unknown', name of the field it used). Anything it cannot read is 'unknown' - never
-    'offline' by default, because a failed or unreadable check says nothing about the device.
-    Refine once real sanitized structures are available (see DeviceConnectionSensor)."""
+    Confirmed from live S23 Ultra & Windows PC payloads:
+      - CHECK_CONNECTION carries `extra.isConnected` (bool) and `oprnStsCd=='2800'` +
+        `oprnResultCode=='1200'` when the device is reachable online;
+      - LOCATION carries `extra.seData.netType` ('wifi' / 'mobile' / ...) and `extra.seData.wifi`.
+    Anything unreadable returns 'unknown' - never 'offline' by default."""
     if not isinstance(op, dict):
         return "unknown", None
     found: list[tuple[str, str]] = []
@@ -2093,19 +2232,30 @@ def parse_connection_state(op: dict | None) -> tuple[str, str | None]:
                     found.append(("online", str(key)))
 
     walk(op)
-    for wanted in ("wifi", "mobile", "offline", "online"):
+    for wanted in ("wifi", "mobile", "offline"):
         for state, source in found:
             if state == wanted:
                 return state, source
-    # Samsung's real CHECK_CONNECTION operation uses oprnStsCd='2800' (completed) and
-    # oprnResultCode='1200' when the device answered the check, or another result code when
-    # the device could not be reached.
-    if op.get("oprnType") == "CHECK_CONNECTION" and str(op.get("oprnStsCd") or "") == "2800":
+    # Determine whether the device is online from explicit flags (`extra.isConnected`) or
+    # from a completed CHECK_CONNECTION (`oprnStsCd == '2800'`).
+    online_source = next((src for st, src in found if st == "online"), None)
+    if online_source is None and op.get("oprnType") == "CHECK_CONNECTION" and str(op.get("oprnStsCd") or "") == "2800":
         result_code = str(op.get("oprnResultCode") or "")
         if result_code == "1200":
-            return "online", "oprnResultCode"
-        if result_code and result_code not in {"00", "200"}:
+            online_source = "oprnResultCode"
+        elif result_code and result_code not in {"00", "200"}:
             return "offline", "oprnResultCode"
+    if online_source is not None:
+        # When the device is online, check if a companion operation (e.g. LOCATION's
+        # `extra.seData.netType`) specifies whether it is on Wi-Fi or mobile data.
+        if isinstance(fallback_op, dict):
+            found.clear()
+            walk(fallback_op)
+            for wanted in ("wifi", "mobile"):
+                for state, source in found:
+                    if state == wanted:
+                        return state, f"{online_source}+{source}"
+        return "online", online_source
     return "unknown", None
 
 
@@ -2673,11 +2823,37 @@ async def get_fmm_device_location(
             "menu": sanitize_structure(body.get("menu")),
             "operations": {},
         }
+        passive_check_op = None
+        passive_loc_op = None
         for op in operations:
             if isinstance(op, dict):
                 op_key = str(op.get("oprnType") or "UNKNOWN")
+                if op_key == "CHECK_CONNECTION":
+                    passive_check_op = op
+                elif op_key == "LOCATION":
+                    passive_loc_op = op
                 if op_key not in server_structure["operations"] and len(server_structure["operations"]) < 12:
                     server_structure["operations"][op_key] = sanitize_structure(op)
+        existing_conn = dev_data.get("_connection")
+        if passive_check_op is not None:
+            p_state, p_source = parse_connection_state(passive_check_op, fallback_op=passive_loc_op or used_op)
+            p_done = _parse_stf_date_safe(
+                passive_check_op.get("oprnDoneDate") or passive_check_op.get("oprnCrtDate")
+            )
+            if not isinstance(existing_conn, dict) or existing_conn.get("state") in (None, "unknown"):
+                dev_data["_connection"] = {
+                    "state": p_state,
+                    "source_field": f"passive:{p_source}" if p_source else None,
+                    "checked_at": p_done,
+                    "success": classify_fmm_operation_result(passive_check_op, "CHECK_CONNECTION") == "success",
+                    "result_code": passive_check_op.get("oprnResultCode"),
+                    "samsung_answered": True,
+                    "structure": sanitize_structure(passive_check_op),
+                }
+            elif existing_conn.get("state") == "online" and p_state in ("wifi", "mobile"):
+                # Enrich a live 'online' check with Wi-Fi / mobile network type from LOCATION's seData.netType
+                existing_conn["state"] = p_state
+                existing_conn["source_field"] = p_source
         structure_signature = json.dumps(server_structure, sort_keys=True, default=str)
         if dev_data.get("_server_structure_logged") != structure_signature:
             dev_data["_server_structure_logged"] = structure_signature

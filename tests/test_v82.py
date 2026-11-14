@@ -32,10 +32,30 @@ for label, payload, want in [
     ("capability only is not a state", {"wifiOnly": "Y"}, "unknown"),
     ("completed CHECK_CONNECTION 1200 is online", {"oprnType": "CHECK_CONNECTION", "oprnStsCd": "2800", "oprnResultCode": "1200"}, "online"),
     ("completed CHECK_CONNECTION error is offline", {"oprnType": "CHECK_CONNECTION", "oprnStsCd": "2800", "oprnResultCode": "2040"}, "offline"),
+    ("S23 Ultra CHECK_CONNECTION isConnected=True", {"oprnType": "CHECK_CONNECTION", "oprnStsCd": "2800", "oprnResultCode": "1200", "extra": {"isConnected": True}}, "online"),
     ("nothing readable", {"oprnType": "CHECK_CONNECTION", "battery": "FULL"}, "unknown"),
     ("not a dict", None, "unknown"),
 ]:
     check(f"parse: {label}", u.parse_connection_state(payload)[0], want)
+check(
+    "parse: S23 Ultra CHECK_CONNECTION + LOCATION seData.netType=wifi",
+    u.parse_connection_state(
+        {"oprnType": "CHECK_CONNECTION", "oprnStsCd": "2800", "oprnResultCode": "1200", "extra": {"isConnected": True}},
+        fallback_op={"oprnType": "LOCATION", "extra": {"seData": {"netType": "wifi"}}},
+    )[0],
+    "wifi",
+)
+
+# --- classify_fmm_operation_result (samsung-re-find state machine) ------------------------------
+for label, op_entry, want in [
+    ("2800+1200 is success", {"oprnStsCd": "2800", "oprnResultCode": "1200"}, "success"),
+    ("2800+2040 is failed", {"oprnStsCd": "2800", "oprnResultCode": "2040"}, "failed"),
+    ("1000 is pending", {"oprnStsCd": "1000"}, "pending"),
+    ("1100 is pending", {"oprnStsCd": "1100"}, "pending"),
+    ("TRACK_LOCATION_START 2100 is success", {"oprnType": "TRACK_LOCATION_START", "oprnStsCd": "2100"}, "success"),
+    ("other 2100 is pending", {"oprnType": "LOCATION", "oprnStsCd": "2100"}, "pending"),
+]:
+    check(f"classify op: {label}", u.classify_fmm_operation_result(op_entry), want)
 
 # --- device classes -----------------------------------------------------------------------------
 def dev(code, fmm=True):
@@ -46,6 +66,8 @@ for code, active in [("PHONE", True), ("PHONE DEVICE", True), ("TABLET", True), 
     check(f"active-connectable {code}", u.is_active_connectable_device(dev(code)), active)
 check("tag is never active-connectable", u.is_active_connectable_device(dev("PHONE", fmm=False)), False)
 check("watch detected", u.is_watch_device(dev("WATCH")), True)
+check("watch detected via WEARABLE + subType WATCH", u.is_watch_device({"is_fmm": True, "web_device_type_code": "WEARABLE", "web_sub_type": "WATCH"}), True)
+check("watch detected via watch.svg icon", u.is_watch_device({"is_fmm": True, "web_device_type_code": "WEARABLE", "icon_url": "https://smartthingsfind.samsung.com/img/device_icon/watch.svg"}), True)
 
 # --- register_position_fix ---------------------------------------------------------------------
 t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)

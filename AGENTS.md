@@ -116,6 +116,12 @@ The following is the history of behavior decisions/fixes in the current GitHub c
 - **Ring** for watches (`is_watch_device`) plus phones. Before ringing, `check_fmm_connection(use_cache=False)`: `offline` raises an error without sending RING; `unknown` rings anyway. Does not apply to SmartTags. Watch ring works only if the watch is online/connected (user-confirmed).
 - **Unknown after N failed attempts** (`unknown_after_failed_attempts`, `Coordinator.apply_position_policy`). **Deliberate, opt-in exception** to "never erase a usable position", valid only for active devices (phone/tablet/PC) with Active Location on. The rule "last position is always good" still holds for all passive devices (Buds, watches, SmartTags) and for any device with the switch off. Counted: scheduled active attempts that Samsung answered (reject/failed/pending/timeout) with no genuinely newer fix. Not counted: local session/HTTP/exception errors (`active_attempt_samsung_outcome` false) and manual presses. It only hides the position in the tracker/location/maps entities (`position_unknown`); data and persisted position are untouched. Counter is in memory.
 - Tests: `tests/test_v82.py`. Live Samsung/HA behavior of all of the above is still unvalidated.
+- **Integrated `charlesbel/samsung-re-find` skills & contracts**:
+  - `.skills/samsung-account-auth/SKILL.md` and `.skills/samsung-re-find/SKILL.md` are tracked in the repo with the Samsung Account PKCE/token rotation/master-token reissue rules and FMM protocol/operation state machine.
+  - `_refresh_token` in `utils.py` now falls back to `_reissue_token_from_master` (re-authorizing via `user_auth_token` when a rotating `refresh_token` expires) before raising `ConfigEntryAuthFailed`.
+  - `perform_fmm_operation` enforces `ALLOWED_FMM_OPERATIONS` (`CHECK_CONNECTION`, `LOCATION`, `RING`, `TRACK_LOCATION_START`, `TRACK_LOCATION_STOP`) and uses `classify_fmm_operation_result` (`1000`/`1100`/`2100` pending vs `2800`+`1200` success vs terminal failure).
+  - Passive `setLastSelect.do` reads also seed `dev_data['_connection']` from any returned `CHECK_CONNECTION` operation when no live check has run yet.
+  - `hass.data[DOMAIN][entry.entry_id]` stores `devices` and `session` **before** `coordinator.async_config_entry_first_refresh()` so any session refresh during the initial poll re-resolves `web_dvce_id` for all devices (preventing cascading HTTP 404s).
 
 ## Known unresolved behavior / next investigation
 
