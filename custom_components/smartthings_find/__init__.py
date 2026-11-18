@@ -44,6 +44,7 @@ from .utils import (
     update_device_maps_link,
     get_device_ble_metadata,
     is_active_connectable_device,
+    is_buds_device,
     register_position_fix,
     get_ha_device,
 )
@@ -355,9 +356,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         sub_type = str(dev_data.get('web_sub_type') or '').upper()
         icon = str(dev_data.get('icon_url') or '').lower()
         return bool(
-            dev_data.get('is_buds')
-            or 'BUD' in device_type
-            or 'BUD' in sub_type
+            is_buds_device(dev_data)
             or 'WATCH' in device_type
             or 'WATCH' in sub_type
             or icon.endswith('/watch.svg')

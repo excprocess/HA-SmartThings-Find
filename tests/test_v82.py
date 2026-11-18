@@ -164,7 +164,9 @@ check("0 disables the rule", tag["position_unknown"], False)
 # --- FMM and Buds Left/Right battery extraction (samsung-re-find PR #2) -------------------------
 check("is_buds_device via is_buds flag", u.is_buds_device({"is_fmm": True, "is_buds": True}), True)
 check("is_buds_device via BUDS code", u.is_buds_device({"is_fmm": True, "web_device_type_code": "BUDS"}), True)
-check("is_buds_device false for phone", u.is_buds_device({"is_fmm": True, "web_device_type_code": "PHONE"}), False)
+check("is_buds_device via CANAL2 subType", u.is_buds_device({"is_fmm": True, "web_device_type_code": "WEARABLE", "web_sub_type": "CANAL2"}), True)
+check("is_buds_device via Emiliano's Buds name", u.is_buds_device({"is_fmm": True, "name": "Emiliano's Buds"}), True)
+check("is_buds_device false for phone", u.is_buds_device({"is_fmm": True, "web_device_type_code": "PHONE", "name": "S23 Ultra"}), False)
 
 buds_ops = [
     {
@@ -178,9 +180,23 @@ buds_ops = [
     }
 ]
 check(
-    "extract_fmm_battery reads Buds Left/Right battery channels",
+    "extract_fmm_battery reads Buds Left/Right battery channels and sets min fallback",
     u.extract_fmm_battery(buds_ops),
-    {"battery_level": None, "left_battery_level": 100, "right_battery_level": 87},
+    {"battery_level": 87, "left_battery_level": 100, "right_battery_level": 87},
+)
+
+buds_json_extra_ops = [
+    {
+        "oprnType": "CHECK_CONNECTION",
+        "oprnStsCd": "2800",
+        "oprnResultCode": "1200",
+        "extra": '{"left": {"battery": "92"}, "right": {"battery": "96"}}',
+    }
+]
+check(
+    "extract_fmm_battery handles JSON-encoded extra string",
+    u.extract_fmm_battery(buds_json_extra_ops),
+    {"battery_level": 92, "left_battery_level": 92, "right_battery_level": 96},
 )
 
 invalid_buds_ops = [

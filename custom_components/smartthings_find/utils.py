@@ -1662,7 +1662,15 @@ def _get_website_device_icon_url(website_device: dict) -> str | None:
             if colored_icon.startswith("/"):
                 return f"{STF_BASE_URL}{colored_icon}"
         return None
-    if device_type == "BUDS":
+    model_name = str(website_device.get("modelName") or website_device.get("nickName") or "").upper()
+    if (
+        device_type in {"BUDS", "BUDS DEVICE", "EARBUDS", "HEARABLE", "HEADSET", "TWS"}
+        or "BUD" in device_type
+        or "HEARABLE" in device_type
+        or sub_type in BUDS_SUBTYPE_ICON_MAP
+        or "BUD" in sub_type
+        or (device_type in {"", "WEARABLE", "ACCESSORY", "AUDIO"} and "BUDS" in model_name)
+    ):
         return f"{STF_BASE_URL}/img/device_icon/{BUDS_SUBTYPE_ICON_MAP.get(sub_type, 'buds_pair')}.svg"
     if device_type == "WATCH":
         return f"{STF_BASE_URL}/img/device_icon/{WATCH_SUBTYPE_ICON_MAP.get(sub_type, 'watch')}.svg"
@@ -1759,12 +1767,17 @@ async def enrich_devices_with_web_metadata(
         # (confirmed against the real site - PC/watch/buds have no ring UI there either).
         dev["web_device_type_code"] = str(match.get("deviceTypeCode") or "").upper()
         dev["web_sub_type"] = str(match.get("subType") or "").upper()
-        dev["is_buds"] = dev["web_device_type_code"] == "BUDS" or "BUD" in dev["web_sub_type"]
+        dev["is_buds"] = is_buds_device(dev)
 
         if dev.get("is_fmm"):
             _LOGGER.debug(
-                "[%s] Resolved website device id for location lookup: dvceID=%s icon=%s",
-                dev.get("name"), match.get("dvceID"), icon_url,
+                "[%s] Resolved website device id for location lookup: dvceID=%s type=%s subType=%s is_buds=%s icon=%s",
+                dev.get("name"),
+                match.get("dvceID"),
+                dev["web_device_type_code"],
+                dev["web_sub_type"],
+                dev["is_buds"],
+                icon_url,
             )
         else:
             _LOGGER.debug(
@@ -2126,9 +2139,34 @@ def is_watch_device(dev_data: dict) -> bool:
 def is_buds_device(dev_data: dict) -> bool:
     if not dev_data.get("is_fmm"):
         return False
+    if dev_data.get("is_buds"):
+        return True
     code = _device_type_code(dev_data)
     sub_type = str(dev_data.get("web_sub_type") or "").upper()
-    return bool(dev_data.get("is_buds") or "BUD" in code or "BUD" in sub_type)
+    icon = str(dev_data.get("icon_url") or "").lower()
+    raw = dev_data.get("raw_device") if isinstance(dev_data.get("raw_device"), dict) else {}
+    names = " ".join(
+        str(v or "")
+        for v in (
+            dev_data.get("original_name"),
+            dev_data.get("name"),
+            raw.get("fmmDevName"),
+            raw.get("fmmDevModel"),
+            raw.get("deviceName"),
+            raw.get("modelName"),
+        )
+    ).upper()
+    return bool(
+        code in {"BUDS", "BUDS DEVICE", "EARBUDS", "HEARABLE", "HEADSET", "TWS"}
+        or "BUD" in code
+        or "HEARABLE" in code
+        or sub_type in BUDS_SUBTYPE_ICON_MAP
+        or "BUD" in sub_type
+        or "CANAL" in sub_type
+        or any(tok in icon for tok in ("/buds", "/attic_pair", "/bean_pair", "/tws_pair"))
+        or "BUDS" in names
+        or "EARBUDS" in names
+    )
 
 
 def is_active_connectable_device(dev_data: dict) -> bool:
@@ -2158,7 +2196,7 @@ _STRUCT_VALUE_KEY = re.compile(
 def sanitize_structure(value, depth: int = 0):
     """Coordinate- and identity-free description of a JSON value (see comment above)."""
     if isinstance(value, dict):
-        if depth >= 3:
+        if depth >= 4:
             return f"dict[{len(value)}]"
         out = {}
         for key, item in list(value.items())[:60]:
@@ -2180,7 +2218,7 @@ def sanitize_structure(value, depth: int = 0):
                 out[key] = type(item).__name__
         return out
     if isinstance(value, list):
-        if depth >= 3:
+        if depth >= 4:
             return f"list[{len(value)}]"
         return [sanitize_structure(item, depth + 1) for item in value[:5]]
     return type(value).__name__
@@ -2444,11 +2482,14 @@ async def get_fmm_device_location(
         # including Buds and watches; prior 501 responses and transient failures do not
         # suppress later retries.
         active_location_attempted = True
-        if dev_data.get("active_location_requested") and is_active_connectable_device(dev_data):
-            # Same website session and the same opted-in cycle as the LOCATION request
-            # below; never sent while the switch is off. Its answer feeds the Connection
-            # sensor and is reused (short cache) by the Ring pre-check.
-            await check_fmm_connection(hass, session, entry_id, dev_data)
+        # Run CHECK_CONNECTION for every opted-in FMM device (or manual Update Location):
+        # for phones/tablets/PCs it feeds the Connection sensor and battery; for Buds and
+        # watches it is the operation that populates `extra.left.battery` / `extra.right.battery`
+        # and `battery` on Samsung's backend (per charlesbel/samsung-re-find PR #2), whereas
+        # `LOCATION` on Buds is rejected with 501. Never sent when the switch is off.
+        await check_fmm_connection(
+            hass, session, entry_id, dev_data, use_cache=not force_active
+        )
         active_sink = {}
         active_success, active_reason = await perform_fmm_operation(
             hass,
@@ -3323,22 +3364,65 @@ def extract_fmm_battery(operations: list | None) -> dict[str, int | None]:
         "LASTLOC": 3,
         "OFFLINE_LOC": 4,
     }
+    def _as_dict(val) -> dict:
+        if isinstance(val, dict):
+            return val
+        if isinstance(val, str):
+            stripped = val.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    loaded = json.loads(stripped)
+                    if isinstance(loaded, dict):
+                        return loaded
+                except Exception:
+                    pass
+        return {}
+
+    def _op_timestamp_num(op: dict) -> int:
+        raw_ts = str(op.get("oprnDoneDate") or op.get("oprnCrtDate") or "")
+        digits = "".join(ch for ch in raw_ts if ch.isdigit())
+        return int(digits) if digits else 0
+
+    def _extract_side(container: dict, side: str) -> int | None:
+        if not isinstance(container, dict):
+            return None
+        node = container.get(side)
+        if isinstance(node, dict):
+            for k in ("battery", "batteryLevel", "battery_percent", "level"):
+                parsed = parse_battery_value(node.get(k))
+                if parsed is not None:
+                    return parsed
+        else:
+            parsed = parse_battery_value(node)
+            if parsed is not None:
+                return parsed
+        for alt_key in (f"{side}Battery", f"{side}_battery", f"battery_{side}", f"battery{side.capitalize()}"):
+            if alt_key in container:
+                parsed = parse_battery_value(container.get(alt_key))
+                if parsed is not None:
+                    return parsed
+        return None
+
     valid_ops = [op for op in operations if isinstance(op, dict)]
     valid_ops.sort(
         key=lambda op: (
             priority_order.get(str(op.get("oprnType") or "").upper(), 99),
-            str(op.get("oprnDoneDate") or op.get("oprnCrtDate") or ""),
+            -_op_timestamp_num(op),
         )
     )
     for op in valid_ops:
-        extra = op.get("extra") if isinstance(op.get("extra"), dict) else {}
-        enc_loc = op.get("encLocation") if isinstance(op.get("encLocation"), dict) else {}
+        extra = _as_dict(op.get("extra"))
+        extra_dm = _as_dict(op.get("extraFromDM"))
+        enc_loc = _as_dict(op.get("encLocation"))
 
         if result["battery_level"] is None:
             for candidate in (
                 op.get("battery"),
                 op.get("battery_percent"),
+                op.get("batteryLevel"),
                 extra.get("battery"),
+                extra.get("batteryLevel"),
+                extra_dm.get("battery"),
                 enc_loc.get("battery"),
             ):
                 parsed = parse_battery_value(candidate)
@@ -3346,17 +3430,24 @@ def extract_fmm_battery(operations: list | None) -> dict[str, int | None]:
                     result["battery_level"] = parsed
                     break
 
-        left = extra.get("left")
-        if result["left_battery_level"] is None and isinstance(left, dict):
-            parsed_left = parse_battery_value(left.get("battery"))
-            if parsed_left is not None:
-                result["left_battery_level"] = parsed_left
+        if result["left_battery_level"] is None:
+            for container in (extra, extra_dm, op, enc_loc):
+                parsed_left = _extract_side(container, "left")
+                if parsed_left is not None:
+                    result["left_battery_level"] = parsed_left
+                    break
 
-        right = extra.get("right")
-        if result["right_battery_level"] is None and isinstance(right, dict):
-            parsed_right = parse_battery_value(right.get("battery"))
-            if parsed_right is not None:
-                result["right_battery_level"] = parsed_right
+        if result["right_battery_level"] is None:
+            for container in (extra, extra_dm, op, enc_loc):
+                parsed_right = _extract_side(container, "right")
+                if parsed_right is not None:
+                    result["right_battery_level"] = parsed_right
+                    break
+
+    if result["battery_level"] is None:
+        lr = [v for v in (result["left_battery_level"], result["right_battery_level"]) if v is not None]
+        if lr:
+            result["battery_level"] = min(lr)
 
     return result
 
