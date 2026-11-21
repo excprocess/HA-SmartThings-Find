@@ -36,6 +36,10 @@ from .const import (
     CONF_EXCLUDED_DEVICES,
     CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS,
     CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT,
+    CONF_PROXIMITY_HOME_ZONE,
+    CONF_PROXIMITY_WORK_ZONE,
+    CONF_PROXIMITY_DISTANCE_UNIT,
+    CONF_PROXIMITY_DISTANCE_UNIT_DEFAULT,
 )
 from .utils import (
     is_in_active_zone,
@@ -47,6 +51,8 @@ from .utils import (
     is_buds_device,
     register_position_fix,
     get_ha_device,
+    resolve_ha_zone,
+    update_proximity_state,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -156,6 +162,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     unknown_after_failed_attempts = int(entry.options.get(
         CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS, CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT) or 0)
+    proximity_home_zone = entry.options.get(CONF_PROXIMITY_HOME_ZONE) or None
+    proximity_work_zone = entry.options.get(CONF_PROXIMITY_WORK_ZONE) or None
+    proximity_distance_unit = entry.options.get(
+        CONF_PROXIMITY_DISTANCE_UNIT, CONF_PROXIMITY_DISTANCE_UNIT_DEFAULT
+    ) or CONF_PROXIMITY_DISTANCE_UNIT_DEFAULT
     position_store = Store(hass, 1, f"{DOMAIN}_{entry.entry_id}_positions")
     try:
         saved_positions = await position_store.async_load() or {}
@@ -229,7 +240,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass, session, devices, update_interval, in_zone_interval, entry.entry_id,
         position_store, saved_positions,
         active_passive_device_interval=active_passive_device_interval,
-        unknown_after_failed_attempts=unknown_after_failed_attempts)
+        unknown_after_failed_attempts=unknown_after_failed_attempts,
+        proximity_home_zone=proximity_home_zone,
+        proximity_work_zone=proximity_work_zone,
+        proximity_distance_unit=proximity_distance_unit)
     if restored_data:
         coordinator.data = restored_data
 
@@ -320,6 +334,9 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         saved_positions: dict | None = None,
         active_passive_device_interval: int = CONF_ACTIVE_PASSIVE_DEVICE_INTERVAL_DEFAULT,
         unknown_after_failed_attempts: int = 0,
+        proximity_home_zone: str | None = None,
+        proximity_work_zone: str | None = None,
+        proximity_distance_unit: str = CONF_PROXIMITY_DISTANCE_UNIT_DEFAULT,
     ):
         """Initialize the coordinator."""
         self.session = session
@@ -331,6 +348,9 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         self.away_interval = update_interval
         self.in_zone_interval = in_zone_interval or update_interval
         self.unknown_after_failed_attempts = max(0, int(unknown_after_failed_attempts or 0))
+        self.proximity_home_zone = proximity_home_zone
+        self.proximity_work_zone = proximity_work_zone
+        self.proximity_distance_unit = proximity_distance_unit
         self.active_passive_device_interval = max(
             MIN_UPDATE_INTERVAL, int(active_passive_device_interval)
         )
@@ -427,6 +447,19 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
         attempts = dev_data.get('_failed_attempts', 0)
         tag_data['failed_attempts'] = attempts
         tag_data['position_unknown'] = bool(eligible and attempts >= threshold)
+
+    def update_device_proximity(self, dev_data: dict, tag_data: dict) -> None:
+        if not self.proximity_home_zone and not self.proximity_work_zone:
+            return
+        home_zone = resolve_ha_zone(self.hass, self.proximity_home_zone)
+        work_zone = resolve_ha_zone(self.hass, self.proximity_work_zone)
+        update_proximity_state(
+            dev_data,
+            tag_data,
+            home_zone,
+            work_zone,
+            distance_unit=self.proximity_distance_unit,
+        )
 
     @staticmethod
     def _is_due(dev_data: dict, previous: dict, now: float) -> bool:
@@ -567,6 +600,7 @@ class SmartThingsFindCoordinator(DataUpdateCoordinator):
                         )
                 tags[dev_data['device_id']] = tag_data
                 self.apply_position_policy(dev_data, tag_data, new_fix, counted)
+                self.update_device_proximity(dev_data, tag_data)
                 if tag_data.get('location_found') and not tag_data.get('position_unknown'):
                     update_device_maps_link(
                         self.hass, dev_data['device_id'], tag_data.get('used_loc'))

@@ -28,13 +28,16 @@
   "options": {
     "step": {
       "init": {
-        "description": "Phones use the in-zone or general interval. Buds, PCs and watches use a separate single interval when their per-device Active Location switch is on. When that switch is off, they are polled passively using the in-zone or general interval. Passive devices (Buds, watches) and SmartTags always keep their last known position.",
+        "description": "Phones use the in-zone or general interval. Buds, PCs and watches use a separate single interval when their per-device Active Location switch is on. When that switch is off, they are polled passively using the in-zone or general interval. Passive devices (Buds, watches) and SmartTags always keep their last known position. The Direction/Proximity sensor is created only for SmartTags (always active) and active-connectable devices (phones, tablets, PCs — active only while their Active Location switch is on, otherwise unknown); it is not created for passive devices (Buds, watches).",
         "data": {
           "update_interval": "Update interval (seconds), used for devices outside any zone",
           "update_interval_in_zone": "Update interval inside a zone (seconds, 0 = same as the general one)",
           "active_passive_device_interval": "Active refresh interval for Buds, PCs and watches (seconds; one interval both inside and outside zones)",
           "excluded_devices": "Devices to exclude from tracking (no polling, no entities)",
-          "unknown_after_failed_attempts": "Show position as unknown after this many failed active attempts (phones, tablets and PCs with Active Location on; 0 = never)"
+          "unknown_after_failed_attempts": "Show position as unknown after this many failed active attempts (phones, tablets and PCs with Active Location on; 0 = never)",
+          "proximity_home_zone": "Home zone for Direction/Proximity sensor (optional; requires Active Location on phones/tablets/PCs, always active on SmartTags)",
+          "proximity_work_zone": "Work zone for Direction/Proximity sensor (optional; requires Active Location on phones/tablets/PCs, always active on SmartTags)",
+          "proximity_distance_unit": "Distance unit for Direction/Proximity sensor attributes"
         }
       }
     }

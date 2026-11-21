@@ -26,6 +26,8 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_ST_USER_UUID,
     CONF_INSTALLED_APP_ID,
+    CONF_USER_AUTH_TOKEN,
+    CONF_LOGIN_ID,
 )
 
 TO_REDACT = {
@@ -34,6 +36,8 @@ TO_REDACT = {
     CONF_REFRESH_TOKEN,
     CONF_IOT_ACCESS_TOKEN,
     CONF_IOT_REFRESH_TOKEN,
+    CONF_USER_AUTH_TOKEN,
+    CONF_LOGIN_ID,
     CONF_USER_ID,
     CONF_USER_EMAIL,
     CONF_AUTH_SERVER_URL,
@@ -46,6 +50,12 @@ TO_REDACT = {
     "ownerId",
     "saGuid",
     "userId",
+    "usrId",
+    "web_usr_id",
+    "web_dvce_id",
+    "dvceID",
+    "fmmDevId",
+    "reqId",
     "members",
     # Anything that gives away where the user is
     "latitude",

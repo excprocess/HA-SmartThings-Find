@@ -12,7 +12,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from .const import DOMAIN, RING_TIMEOUT_SECONDS
 from .utils import (
     ring_device, stop_ring_device, format_ring_error, ring_fmm_device, stop_ring_fmm_device,
-    check_fmm_connection, is_watch_device,
+    check_fmm_connection, is_phone_device, is_watch_device,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -32,10 +32,7 @@ async def async_setup_entry(
             entities.append(RingSwitch(hass, entry.entry_id, device))
         if device["data"].get("is_fmm"):
             entities.append(ActiveLocationSwitch(hass, entry.entry_id, device, coordinator))
-            if (
-                device["data"].get("web_device_type_code") in ("PHONE", "PHONE DEVICE")
-                or is_watch_device(device["data"])
-            ):
+            if is_phone_device(device["data"]) or is_watch_device(device["data"]):
                 # Ring is exposed for phones and, as long as they are online and connected,
                 # watches. Buds/PC don't offer it. Every ring first checks that the device
                 # is online (see FmmRingSwitch.async_turn_on).

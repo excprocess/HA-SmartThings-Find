@@ -28,13 +28,16 @@
   "options": {
     "step": {
       "init": {
-        "description": "Telefone verwenden das Zonenintervall oder das allgemeine Intervall. Buds, PCs und Uhren verwenden ein separates Intervall, wenn ihr gerätespezifischer Schalter Active Location eingeschaltet ist. Ist der Schalter ausgeschaltet, werden sie passiv nach Zonen- oder allgemeinem Intervall abgefragt. Passive Geräte (Buds, Uhren) und SmartTags behalten immer ihre letzte bekannte Position.",
+        "description": "Telefone verwenden das Zonenintervall oder das allgemeine Intervall. Buds, PCs und Uhren verwenden ein separates Intervall, wenn ihr gerätespezifischer Schalter Active Location eingeschaltet ist. Ist der Schalter ausgeschaltet, werden sie passiv nach Zonen- oder allgemeinem Intervall abgefragt. Passive Geräte (Buds, Uhren) und SmartTags behalten immer ihre letzte bekannte Position. Der Richtungs-/Näherungssensor wird nur für SmartTags (immer aktiv) sowie aktive Geräte (Handys, Tablets, PCs — nur aktiv bei eingeschaltetem Active Location, sonst unbekannt) erstellt; für passive Geräte (Buds, Uhren) wird er nicht erstellt.",
         "data": {
           "update_interval": "Aktualisierungsintervall (Sekunden), für Geräte außerhalb jeder Zone",
           "update_interval_in_zone": "Aktualisierungsintervall innerhalb einer Zone (Sekunden, 0 = wie das allgemeine)",
           "active_passive_device_interval": "Aktives Aktualisierungsintervall für Buds, PCs und Uhren (Sekunden; ein Intervall innerhalb und außerhalb von Zonen)",
           "excluded_devices": "Von der Verfolgung ausgeschlossene Geräte (keine Abfragen, keine Entitäten)",
-          "unknown_after_failed_attempts": "Position nach so vielen fehlgeschlagenen aktiven Versuchen als unbekannt anzeigen (Handys, Tablets und PCs mit aktivem Standort; 0 = nie)"
+          "unknown_after_failed_attempts": "Position nach so vielen fehlgeschlagenen aktiven Versuchen als unbekannt anzeigen (Handys, Tablets und PCs mit aktivem Standort; 0 = nie)",
+          "proximity_home_zone": "Home-Zone für Richtungs-/Näherungssensor (optional; benötigt Active Location auf Handys/Tablets/PCs, immer aktiv auf SmartTags)",
+          "proximity_work_zone": "Work-Zone für Richtungs-/Näherungssensor (optional; benötigt Active Location auf Handys/Tablets/PCs, immer aktiv auf SmartTags)",
+          "proximity_distance_unit": "Distanz-Einheit für Richtungs-/Näherungssensor-Attribute"
         }
       }
     }

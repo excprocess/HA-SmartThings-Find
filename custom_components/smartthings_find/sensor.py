@@ -11,9 +11,12 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .utils import (
+    DIRECTION_STATES,
     google_maps_url,
     is_active_connectable_device,
     is_buds_device,
+    is_direction_supported_device,
+    is_phone_device,
     resolve_device_battery_value,
 )
 _LOGGER = logging.getLogger(__name__)
@@ -61,6 +64,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             # Phones, tablets and PCs only: passive devices (Buds, watches, tags) are
             # offline whenever they are away from their phone, so this tells nothing there.
             entities += [DeviceConnectionSensor(hass, coordinator, device)]
+        proximity_enabled = bool(
+            getattr(coordinator, "proximity_home_zone", None)
+            or getattr(coordinator, "proximity_work_zone", None)
+        )
+        if proximity_enabled and is_direction_supported_device(dev_data):
+            entities += [DeviceDirectionSensor(hass, coordinator, device)]
+        else:
+            old_dir_id = registry.async_get_entity_id(
+                "sensor", DOMAIN, f"stf_direction_{device_id}"
+            )
+            if old_dir_id:
+                registry.async_remove(old_dir_id)
         if device['data'].get("is_fmm"):
             device_id = device['data'].get('device_id')
             for old_domain, old_unique_id in (
@@ -414,6 +429,8 @@ class DeviceConnectionSensor(CoordinatorEntity, SensorEntity):
     def native_value(self):
         connection = self.device.get('_connection') or {}
         state = connection.get('state')
+        if state == "online" and is_phone_device(self.device):
+            state = "mobile"
         return state if state in self._attr_options else "unknown"
 
     @property
@@ -564,3 +581,65 @@ class DeviceLocationRetrievalErrorSensor(CoordinatorEntity, SensorEntity):
             })
         attrs.update(diagnostics)
         return attrs
+
+
+class DeviceDirectionSensor(CoordinatorEntity, SensorEntity):
+    """Proximity and movement direction relative to configured Home / Work zones."""
+
+    _attr_icon = "mdi:compass-outline"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = list(DIRECTION_STATES)
+
+    def __init__(self, hass: HomeAssistant, coordinator, device):
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        device_id = device['data'].get("device_id")
+        name = device['data'].get("name") or device_id or "SmartThings Find"
+        self._attr_unique_id = f"stf_direction_{device_id}"
+        self._attr_name = f"{name} Direction"
+        self.hass = hass
+        self.device = device['data']
+        self.device_id = device_id
+        self._attr_device_info = device['ha_dev_info']
+
+    def _proximity(self) -> dict:
+        if is_active_connectable_device(self.device) and not self.device.get("active_location_requested"):
+            return {}
+        tag_data = (self.coordinator.data or {}).get(self.device_id, {}) or {}
+        if tag_data.get("position_unknown"):
+            return {}
+        return tag_data.get("proximity") or {}
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self):
+        prox = self._proximity()
+        state = prox.get("state")
+        return state if state in self._attr_options else "unknown"
+
+    @property
+    def extra_state_attributes(self):
+        prox = self._proximity()
+        unit = prox.get("distance_unit") or getattr(self.coordinator, "proximity_distance_unit", "m")
+        last_fix = prox.get("last_fix_at")
+        return {
+            "distance_unit": unit,
+            f"distance_home_{unit}": prox.get("distance_home"),
+            f"distance_work_{unit}": prox.get("distance_work"),
+            f"delta_home_{unit}": prox.get("delta_home"),
+            f"delta_work_{unit}": prox.get("delta_work"),
+            "speed_kmh": prox.get("speed_kmh"),
+            "bearing_deg": prox.get("bearing_deg"),
+            "alignment_home": prox.get("alignment_home"),
+            "alignment_work": prox.get("alignment_work"),
+            "home_zone": prox.get("home_zone") or getattr(self.coordinator, "proximity_home_zone", None),
+            "work_zone": prox.get("work_zone") or getattr(self.coordinator, "proximity_work_zone", None),
+            "samples_used": prox.get("samples_used", 0),
+            "last_fix_at": (
+                dt_util.as_local(last_fix).isoformat(timespec="seconds")
+                if isinstance(last_fix, datetime) else None
+            ),
+        }

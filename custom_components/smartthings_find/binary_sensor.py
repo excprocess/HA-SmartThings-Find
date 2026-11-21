@@ -3,6 +3,7 @@ from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .utils import get_power_saving_state
@@ -21,7 +22,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     async_add_entities(entities)
 
 
-class DevicePowerSavingSensor(BinarySensorEntity):
+class DevicePowerSavingSensor(CoordinatorEntity, BinarySensorEntity):
     """The tag's power saving mode ("Energiesparmodus"), read-only.
 
     Read from bleD2D.metadata.activeMode.mode on the SmartThings device API. This is a
@@ -34,6 +35,7 @@ class DevicePowerSavingSensor(BinarySensorEntity):
 
     def __init__(self, hass: HomeAssistant, coordinator, device):
         """Initialize the sensor."""
+        super().__init__(coordinator)
         self.coordinator = coordinator
         device_id = device['data'].get("device_id")
         name = device['data'].get("name") or device_id or "SmartThings Find"

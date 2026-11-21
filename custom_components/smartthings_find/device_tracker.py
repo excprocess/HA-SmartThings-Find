@@ -32,6 +32,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
         self.device = device['data']
         self.device_id = self.device.get("device_id")
         self._last_tag_data = None
+        self._last_snapshot = None
 
         name = self.device.get("name") or self.device_id or "SmartThings Find"
         self._attr_unique_id = f"stf_device_tracker_{self.device_id}"
@@ -83,16 +84,51 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
         if data.get('location_found') and not data.get('position_unknown'):
             update_device_maps_link(self.hass, self.device_id, data.get('used_loc'))
         self._last_tag_data = self.coordinator.data.get(self.device_id)
+        self._last_snapshot = self._tracker_snapshot(self._last_tag_data)
         self.async_on_remove(
             self.coordinator.async_add_listener(self._handle_coordinator_update)
         )
 
+    def _tracker_snapshot(self, tag_data: dict | None) -> tuple:
+        """Fingerprint of the tracker's actual position and availability.
+
+        Polling metadata (retrieval time, next poll time, API call counters) changes on
+        every cycle even when Samsung returned the exact same old fix. Comparing only the
+        real tracker state ensures `last_updated` and `last_changed` never advance unless
+        a genuinely new position, availability change, or mode change occurred.
+        """
+        data = tag_data or {}
+        available = bool(data) and bool(data.get("update_success") or data.get("location_found"))
+        pos_unknown = bool(data.get("position_unknown"))
+        used_loc = data.get("used_loc") or {}
+        if data.get("location_found") and not pos_unknown:
+            lat = used_loc.get("latitude")
+            lon = used_loc.get("longitude")
+            acc = used_loc.get("gps_accuracy") or 0
+            gps_date = used_loc.get("gps_date")
+        else:
+            lat, lon, acc, gps_date = None, None, 0, None
+        return (
+            available,
+            pos_unknown,
+            lat,
+            lon,
+            acc,
+            gps_date,
+            bool(self.device.get("active_location_requested")),
+            data.get("next_update_mode"),
+        )
+
     def _handle_coordinator_update(self) -> None:
-        """Write this tracker only when its own coordinator data was replaced."""
+        """Write this tracker only when its real position or availability changed."""
         tag_data = self.coordinator.data.get(self.device_id)
         if tag_data is self._last_tag_data:
             return
+        snapshot = self._tracker_snapshot(tag_data)
         self._last_tag_data = tag_data
+        if snapshot == self._last_snapshot:
+            return
+        self._last_snapshot = snapshot
         self.async_write_ha_state()
 
     def async_write_ha_state(self):
@@ -161,8 +197,13 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
         tag_data = self.coordinator.data.get(self.device_id, {}) or {}
         redundant = {
             "friendly_name",
+            "name",
             "dev_name",
+            "dev_id",
             "icon_url",
+            "update_success",
+            "location_found",
+            "proximity",
             "is_tracker",
             "is_buds",
             "is_fmm",
@@ -205,6 +246,11 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
             "failed_attempts",
             "active_location_attempted",
             "active_attempt_samsung_outcome",
+            "battery_level",
+            "left_battery_level",
+            "right_battery_level",
+            "position_unknown",
+            "restored_position",
         }
         attrs = {
             key: value

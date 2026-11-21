@@ -32,6 +32,25 @@ CONF_EXCLUDED_DEVICES = "excluded_devices"
 CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS = "unknown_after_failed_attempts"
 CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT = 0
 
+# Proximity / Direction sensor options (uses native Home Assistant zone entities)
+CONF_PROXIMITY_HOME_ZONE = "proximity_home_zone"
+CONF_PROXIMITY_WORK_ZONE = "proximity_work_zone"
+CONF_PROXIMITY_DISTANCE_UNIT = "proximity_distance_unit"
+CONF_PROXIMITY_DISTANCE_UNIT_DEFAULT = "m"
+PROXIMITY_DISTANCE_UNITS = ("m", "km")
+
+# Anti-false-positive tuning for Proximity / Direction
+PROXIMITY_MIN_MOVE_M = 120.0
+PROXIMITY_ACCURACY_FACTOR = 0.75
+PROXIMITY_MAX_ACCURACY_M = 300.0
+PROXIMITY_MIN_ALIGNMENT_ENTER = 0.60
+PROXIMITY_MIN_ALIGNMENT_KEEP = 0.45
+PROXIMITY_COLLINEAR_MARGIN = 0.15
+PROXIMITY_MAX_GAP_S = 1800
+PROXIMITY_DECAY_S = 900
+PROXIMITY_MAX_SPEED_KMH = 250.0
+PROXIMITY_HISTORY_MAX_POINTS = 6
+
 # A CHECK_CONNECTION answer is reused for this long (Ring pre-check always asks fresh).
 CONNECTION_CACHE_SECONDS = 60
 

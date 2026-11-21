@@ -123,6 +123,10 @@ The following is the history of behavior decisions/fixes in the current GitHub c
   - Passive `setLastSelect.do` reads also seed `dev_data['_connection']` from any returned `CHECK_CONNECTION` operation when no live check has run yet.
   - `hass.data[DOMAIN][entry.entry_id]` stores `devices` and `session` **before** `coordinator.async_config_entry_first_refresh()` so any session refresh during the initial poll re-resolves `web_dvce_id` for all devices (preventing cascading HTTP 404s).
   - Re-enabled FMM battery (`DeviceBatterySensor`) and added differentiated Left/Right earbud battery sensors for Galaxy Buds (`DeviceBudsBatterySensor`, `extract_fmm_battery` in `utils.py`, based on `charlesbel/samsung-re-find` PR #2).
+  - **Device tracker snapshot isolation**: `SmartThingsDeviceTracker._handle_coordinator_update` compares `_tracker_snapshot` (availability, `position_unknown`, lat/lon/accuracy, `gps_date`, mode) and skips `async_write_ha_state()` when a poll returns the exact same position, preventing `last_updated`/`last_changed` churn on passive/unchanged devices.
+  - **Local brand icons**: added `custom_components/smartthings_find/brand/{icon,icon@2x,logo,logo@2x}.png`.
+  - **Proximity / Direction sensor** (`DeviceDirectionSensor`, `update_proximity_state` in `utils.py`, options `proximity_home_zone`, `proximity_work_zone`, `proximity_distance_unit` in `m`/`km`): created only for SmartTags (always active) and active-connectable devices (phones/tablets/PCs — active only while `Active Location` is ON, otherwise `unknown`); never created for passive FMM devices (Buds, watches). States: `at_home`, `at_work`, `towards_home`, `towards_work`, `stationary`, `none`, `unknown`. Tested in `tests/test_proximity.py`.
+  - **8.5.0 polish**: mobile devices (`is_phone_device`: phones/tablets) map generic `online` `CHECK_CONNECTION` state to `mobile` (PCs keep `online`); PC devices (`is_pc_device`) are excluded from the `LOW_ACCURACY_THRESHOLD_M` warning flag since Wi-Fi/IP geolocation routinely reports ~200–500 m. Manifest bumped to `8.5.0`.
 
 ## Known unresolved behavior / next investigation
 

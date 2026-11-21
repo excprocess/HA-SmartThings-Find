@@ -29,6 +29,11 @@ from .const import (
     CONF_EXCLUDED_DEVICES,
     CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS,
     CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT,
+    CONF_PROXIMITY_HOME_ZONE,
+    CONF_PROXIMITY_WORK_ZONE,
+    CONF_PROXIMITY_DISTANCE_UNIT,
+    CONF_PROXIMITY_DISTANCE_UNIT_DEFAULT,
+    PROXIMITY_DISTANCE_UNITS,
 )
 from .utils import do_login_stage_one, do_login_stage_two
 import asyncio
@@ -44,16 +49,7 @@ class SmartThingsFindConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
 
     reauth_entry: ConfigEntry | None = None
-
-    task_stage_one: asyncio.Task | None = None
-    task_stage_two: asyncio.Task | None = None
-
-    session = None
-
-    jsessionid = None
-
-
-    error = None
+    login_url: str | None = None
 
     async def async_step_user(self, user_input=None):
         """Handle the initial step."""
@@ -149,6 +145,9 @@ class SmartThingsFindConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None):
+        entry_id = self.context.get("entry_id")
+        if entry_id:
+            self.reauth_entry = self.hass.config_entries.async_get_entry(entry_id)
         return await self.async_step_user()
     
     @staticmethod
@@ -194,6 +193,12 @@ class SmartThingsFindOptionsFlowHandler(OptionsFlowWithConfigEntry):
                     CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS,
                     CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT,
                 ) or 0))
+            for z_key in (CONF_PROXIMITY_HOME_ZONE, CONF_PROXIMITY_WORK_ZONE):
+                z_val = options.get(z_key)
+                if not z_val:
+                    options[z_key] = None
+            if options.get(CONF_PROXIMITY_DISTANCE_UNIT) not in PROXIMITY_DISTANCE_UNITS:
+                options[CONF_PROXIMITY_DISTANCE_UNIT] = CONF_PROXIMITY_DISTANCE_UNIT_DEFAULT
             # The device picker is only offered when Samsung's device list is known (the
             # entry is loaded); otherwise keep the existing exclusions untouched.
             options.setdefault(
@@ -251,6 +256,33 @@ class SmartThingsFindOptionsFlowHandler(OptionsFlowWithConfigEntry):
                         CONF_UNKNOWN_AFTER_FAILED_ATTEMPTS_DEFAULT,
                     ),
                 ): vol.All(vol.Coerce(int), vol.Clamp(min=0)),
+                vol.Optional(
+                    CONF_PROXIMITY_HOME_ZONE,
+                    description={"suggested_value": self.options.get(CONF_PROXIMITY_HOME_ZONE)},
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="zone")
+                ),
+                vol.Optional(
+                    CONF_PROXIMITY_WORK_ZONE,
+                    description={"suggested_value": self.options.get(CONF_PROXIMITY_WORK_ZONE)},
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="zone")
+                ),
+                vol.Optional(
+                    CONF_PROXIMITY_DISTANCE_UNIT,
+                    default=self.options.get(
+                        CONF_PROXIMITY_DISTANCE_UNIT,
+                        CONF_PROXIMITY_DISTANCE_UNIT_DEFAULT,
+                    ),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            {"value": "m", "label": "Meters (m)"},
+                            {"value": "km", "label": "Kilometers (km)"},
+                        ],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
                 # Active-mode is now a per-device "Active Location" switch (only on FMM
                 # devices - phone/tablet/watch/buds - where it actually has an effect;
                 # SmartTags always reject it, resultCode=01) instead of a single global

@@ -20,6 +20,13 @@ This project is a fork in a long chain: [Vedeneb/HA-SmartThings-Find](https://gi
 login rework from [PixelShober/HA-SmartThings-Find](https://github.com/PixelShober/HA-SmartThings-Find).
 See [Credits](#credits) for everything this fork builds on.
 
+## What's new in 8.5
+
+- **Proximity / Direction sensor (`<name> Direction`)**: select your Home Assistant **Home** and **Work** zones and preferred distance unit (`m` / `km`) in the integration options to track distances and movement direction (`at_home`, `at_work`, `towards_home`, `towards_work`, `stationary`, `none`, `unknown`) with anti-jitter and collinearity safeguards. Created for SmartTags (always active) and phones/tablets/PCs (active while `Active Location` is on, otherwise `unknown`); omitted for passive devices (Buds, watches).
+- **No more `device_tracker` timestamp churn**: unchanged passive polls no longer advance `last_updated` / `last_changed` on `device_tracker` entities.
+- **Mobile `Connection` & PC accuracy polish**: phones/tablets now report `mobile` instead of `online` when connected over cellular data, and PCs are excluded from the 100 m low-accuracy warning.
+- **Local integration icon** plus reliability/security fixes (diagnostics master-token redaction, `Power Saving` sensor updates, `Reconfigure` flow fix, tablet Ring support, and improved Galaxy Buds detection).
+
 ## What's new in 8.3
 
 - **Battery sensors re-enabled for Find My Mobile devices & differentiated Left/Right Battery for Galaxy Buds**:

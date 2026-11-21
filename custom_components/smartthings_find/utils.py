@@ -13,6 +13,7 @@ import secrets
 import urllib.parse
 import uuid
 import re
+import math
 from datetime import datetime, timedelta
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.core import HomeAssistant
@@ -33,6 +34,9 @@ from .const import (
     CONF_INSTALLED_APP_ID, CONF_ST_USER_UUID,
     WEB_FIND_CLIENT_ID, WEB_FIND_SCOPE, CONF_USER_AUTH_TOKEN, CONF_LOGIN_ID,
     CONF_UPDATE_INTERVAL_DEFAULT, LOW_ACCURACY_THRESHOLD_M, CONNECTION_CACHE_SECONDS,
+    PROXIMITY_MIN_MOVE_M, PROXIMITY_ACCURACY_FACTOR, PROXIMITY_MAX_ACCURACY_M,
+    PROXIMITY_MIN_ALIGNMENT_ENTER, PROXIMITY_MIN_ALIGNMENT_KEEP, PROXIMITY_COLLINEAR_MARGIN,
+    PROXIMITY_MAX_GAP_S, PROXIMITY_DECAY_S, PROXIMITY_MAX_SPEED_KMH, PROXIMITY_HISTORY_MAX_POINTS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -180,6 +184,7 @@ def _sync_entity_names(hass: HomeAssistant, device_id: str, name: str) -> None:
         ("sensor", f"stf_device_battery_right_{device_id}", f"{name} Right Battery"),
         ("sensor", f"stf_device_location_{device_id}", f"{name} Location"),
         ("sensor", f"stf_device_maps_link_{device_id}", f"{name} Maps Link"),
+        ("sensor", f"stf_direction_{device_id}", f"{name} Direction"),
         ("binary_sensor", f"stf_power_saving_{device_id}", f"{name} Power Saving"),
         ("switch", f"stf_ring_switch_{device_id}", f"{name} Ring"),
         ("button", f"stf_ring_button_{device_id}", f"{name} Ring"),
@@ -1104,43 +1109,6 @@ async def refresh_iot_token(
         CLIENT_ID_ONECONNECT,
         WEB_FIND_SCOPE,
     )
-
-
-async def authenticated_request(hass: HomeAssistant, session: aiohttp.ClientSession, entry_id: str, url: str, json_data: dict = None, data: dict = None) -> tuple[int, str]:
-    """
-    Helper to perform an authenticated request with automatic token refresh.
-    
-    Returns:
-        tuple: (status_code, response_text)
-    """
-    headers = _get_find_headers(hass, entry_id)
-    
-    async def _do_req(auth_headers: dict[str, str]):
-        # We prefer JSON if provided, else data (which might be empty dict for get_devices)
-        if json_data is not None:
-             async with session.post(url, json=json_data, headers=auth_headers) as resp:
-                 return resp.status, await resp.text()
-        else:
-             async with session.post(url, data=data or {}, headers=auth_headers) as resp:
-                 return resp.status, await resp.text()
-
-    status, text = await _do_req(headers)
-    
-    if status in [401, 403]:
-        _LOGGER.info(f"Request to {url.split('/')[-1]} returned {status}, refreshing token...")
-        try:
-            new_token = await refresh_find_token(hass, session, entry_id)
-        except Exception as e:
-            _LOGGER.error(f"Failed to refresh token: {e}")
-            raise ConfigEntryAuthFailed("Token refresh failed")
-            
-        headers["X-Sec-Sa-Authtoken"] = f"{new_token}"
-        status, text = await _do_req(headers)
-        
-        if status in [401, 403]:
-             raise ConfigEntryAuthFailed(f"Auth failed after refresh: {status}")
-             
-    return status, text
 
 
 LOCATION_OP_TYPES = ("LOCATION", "LASTLOC", "OFFLINE_LOC")
@@ -2176,6 +2144,16 @@ def is_active_connectable_device(dev_data: dict) -> bool:
     return is_phone_device(dev_data) or is_pc_device(dev_data)
 
 
+def is_direction_supported_device(dev_data: dict) -> bool:
+    """Devices eligible for the Proximity / Direction sensor:
+    - SmartTags (`is_tracker`): always active.
+    - Active-connectable FMM devices (`is_active_connectable_device`: phones, tablets, PCs):
+      created, but active only while `Active Location` is on (otherwise `unknown`).
+    - Passive FMM devices (Buds, watches): not eligible (entity is not created).
+    """
+    return bool(dev_data.get("is_tracker") or is_active_connectable_device(dev_data))
+
+
 # Sanitized-structure helpers. Samsung's FMM payloads are undocumented; to see what the server
 # actually exposes (and for future features) we log/expose the *shape* of its answers: every key
 # with its value type, and the value itself only for short, status-like fields that cannot
@@ -2356,6 +2334,10 @@ async def check_fmm_connection(
             state, source = "online", "operation_result"
         elif reason != "501":
             state, source = "offline", "operation_result"
+    if state == "online" and is_phone_device(dev_data):
+        # On Samsung mobile devices (phones/tablets), an online CHECK_CONNECTION without
+        # Wi-Fi netType indicates a cellular mobile data connection.
+        state = "mobile"
     structure = sanitize_structure(op) if isinstance(op, dict) else None
     if isinstance(op, dict):
         live_batt = extract_fmm_battery([op])
@@ -2751,7 +2733,13 @@ async def get_fmm_device_location(
                 )
 
         gps_accuracy = (used_loc or {}).get('gps_accuracy')
-        low_accuracy = gps_accuracy is not None and gps_accuracy > LOW_ACCURACY_THRESHOLD_M
+        # Windows PCs rely on Wi-Fi/IP geolocation and routinely report ~200-500 m accuracy,
+        # so do not flag low-accuracy warnings for PC devices.
+        low_accuracy = (
+            not is_pc_device(dev_data)
+            and gps_accuracy is not None
+            and gps_accuracy > LOW_ACCURACY_THRESHOLD_M
+        )
         if low_accuracy:
             position_error = (
                 f"Samsung returned a position with low accuracy ({gps_accuracy:.1f} m; "
@@ -2909,6 +2897,8 @@ async def get_fmm_device_location(
         existing_conn = dev_data.get("_connection")
         if passive_check_op is not None:
             p_state, p_source = parse_connection_state(passive_check_op, fallback_op=passive_loc_op or used_op)
+            if p_state == "online" and is_phone_device(dev_data):
+                p_state = "mobile"
             p_done = _parse_stf_date_safe(
                 passive_check_op.get("oprnDoneDate") or passive_check_op.get("oprnCrtDate")
             )
@@ -2922,8 +2912,8 @@ async def get_fmm_device_location(
                     "samsung_answered": True,
                     "structure": sanitize_structure(passive_check_op),
                 }
-            elif existing_conn.get("state") == "online" and p_state in ("wifi", "mobile"):
-                # Enrich a live 'online' check with Wi-Fi / mobile network type from LOCATION's seData.netType
+            elif existing_conn.get("state") in ("online", "mobile") and p_state in ("wifi", "mobile"):
+                # Enrich a live 'online'/'mobile' check with Wi-Fi / mobile network type from LOCATION's seData.netType
                 existing_conn["state"] = p_state
                 existing_conn["source_field"] = p_source
         structure_signature = json.dumps(server_structure, sort_keys=True, default=str)
@@ -3475,9 +3465,298 @@ def resolve_device_battery_value(
     return val if val is not None else last_batt.get("battery_level")
 
 
-def get_battery_level(dev_name: str, ops: list) -> int | None:
-    """Try to extract the device battery level from the received operation list."""
-    return extract_fmm_battery(ops).get("battery_level")
+# ---------------------------------------------------------------------------------------------
+# Proximity & Direction (Home / Work)
+# ---------------------------------------------------------------------------------------------
+DIRECTION_STATES = (
+    "at_home",
+    "at_work",
+    "towards_home",
+    "towards_work",
+    "stationary",
+    "none",
+    "unknown",
+)
 
 
+def haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return the great-circle distance in meters between two WGS84 coordinates."""
+    r_earth = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2.0) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+    )
+    return 2.0 * r_earth * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
 
+
+def initial_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return initial compass bearing in degrees [0, 360) from point 1 to point 2."""
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dlambda = math.radians(lon2 - lon1)
+    y = math.sin(dlambda) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlambda)
+    return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+def resolve_ha_zone(hass: HomeAssistant, zone_entity_id: str | None) -> dict | None:
+    """Read latitude, longitude and radius of a configured Home Assistant zone entity."""
+    if not zone_entity_id or not isinstance(zone_entity_id, str):
+        return None
+    states = getattr(hass, "states", None)
+    if states is None or not hasattr(states, "get"):
+        return None
+    st = states.get(zone_entity_id)
+    if st is None:
+        return None
+    attrs = getattr(st, "attributes", None) or {}
+    lat = _to_float(attrs.get("latitude"))
+    lon = _to_float(attrs.get("longitude"))
+    radius = _to_float(attrs.get("radius"))
+    if lat is None or lon is None:
+        return None
+    return {
+        "entity_id": zone_entity_id,
+        "latitude": lat,
+        "longitude": lon,
+        "radius": max(0.0, radius or 0.0),
+    }
+
+
+def _format_distance(meters: float | None, unit: str) -> float | int | None:
+    if meters is None:
+        return None
+    if unit == "km":
+        return round(meters / 1000.0, 2)
+    return round(meters)
+
+
+def update_proximity_state(
+    dev_data: dict,
+    tag_data: dict,
+    home_zone: dict | None,
+    work_zone: dict | None,
+    *,
+    distance_unit: str = "m",
+    now: datetime | None = None,
+) -> dict:
+    """Compute proximity distances and movement direction towards Home / Work."""
+    unit = "km" if distance_unit == "km" else "m"
+    now_utc = now or datetime.now(pytz.UTC)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=pytz.UTC)
+
+    base = {
+        "state": "unknown",
+        "distance_unit": unit,
+        "distance_home": None,
+        "distance_work": None,
+        "delta_home": None,
+        "delta_work": None,
+        "speed_kmh": None,
+        "bearing_deg": None,
+        "alignment_home": None,
+        "alignment_work": None,
+        "home_zone": home_zone.get("entity_id") if isinstance(home_zone, dict) else None,
+        "work_zone": work_zone.get("entity_id") if isinstance(work_zone, dict) else None,
+        "samples_used": 0,
+        "last_fix_at": None,
+    }
+
+    if not home_zone and not work_zone:
+        tag_data["proximity"] = base
+        return base
+
+    if not is_direction_supported_device(dev_data):
+        tag_data["proximity"] = base
+        return base
+
+    # Active-connectable devices (phones, tablets, PCs) require Active Location ON.
+    if is_active_connectable_device(dev_data) and not dev_data.get("active_location_requested"):
+        dev_data["_proximity_history"] = []
+        dev_data.pop("_proximity_last_state", None)
+        tag_data["proximity"] = base
+        return base
+
+    if tag_data.get("position_unknown") or not tag_data.get("location_found"):
+        tag_data["proximity"] = base
+        return base
+
+    used_loc = tag_data.get("used_loc") or {}
+    lat = _to_float(used_loc.get("latitude"))
+    lon = _to_float(used_loc.get("longitude"))
+    if lat is None or lon is None:
+        tag_data["proximity"] = base
+        return base
+
+    acc = max(0.0, _to_float(used_loc.get("gps_accuracy")) or 0.0)
+    gps_date = used_loc.get("gps_date")
+    if isinstance(gps_date, datetime) and gps_date.tzinfo is None:
+        gps_date = gps_date.replace(tzinfo=pytz.UTC)
+    elif not isinstance(gps_date, datetime):
+        gps_date = now_utc
+
+    dist_home = (
+        haversine_distance_m(lat, lon, home_zone["latitude"], home_zone["longitude"])
+        if home_zone else None
+    )
+    dist_work = (
+        haversine_distance_m(lat, lon, work_zone["latitude"], work_zone["longitude"])
+        if work_zone else None
+    )
+    base["distance_home"] = _format_distance(dist_home, unit)
+    base["distance_work"] = _format_distance(dist_work, unit)
+    base["last_fix_at"] = gps_date
+
+    # Check zone containment first (deterministic tie-break if Home and Work overlap).
+    in_home = dist_home is not None and dist_home <= home_zone["radius"]
+    in_work = dist_work is not None and dist_work <= work_zone["radius"]
+    if in_home and in_work:
+        zone_state = "at_home" if dist_home <= dist_work else "at_work"
+    elif in_home:
+        zone_state = "at_home"
+    elif in_work:
+        zone_state = "at_work"
+    else:
+        zone_state = None
+
+    history: list[dict] = dev_data.setdefault("_proximity_history", [])
+    last_sample = history[-1] if history else None
+    is_strictly_newer = last_sample is None or gps_date > last_sample["gps_date"]
+
+    if is_strictly_newer and acc <= PROXIMITY_MAX_ACCURACY_M:
+        accept_sample = True
+        if last_sample is not None:
+            dt_s = (gps_date - last_sample["gps_date"]).total_seconds()
+            if dt_s > PROXIMITY_MAX_GAP_S:
+                history.clear()
+            elif dt_s > 0:
+                step_m = haversine_distance_m(
+                    last_sample["lat"], last_sample["lon"], lat, lon
+                )
+                speed_kmh = (step_m / dt_s) * 3.6
+                if speed_kmh > PROXIMITY_MAX_SPEED_KMH:
+                    accept_sample = False
+        if accept_sample:
+            history.append({
+                "lat": lat,
+                "lon": lon,
+                "acc": acc,
+                "gps_date": gps_date,
+                "dist_home": dist_home,
+                "dist_work": dist_work,
+            })
+            if len(history) > PROXIMITY_HISTORY_MAX_POINTS:
+                del history[:-PROXIMITY_HISTORY_MAX_POINTS]
+
+    base["samples_used"] = len(history)
+
+    if zone_state is not None:
+        base["state"] = zone_state
+        dev_data["_proximity_last_state"] = zone_state
+        tag_data["proximity"] = base
+        return base
+
+    fix_age_s = max(0.0, (now_utc - gps_date).total_seconds())
+    if fix_age_s > PROXIMITY_DECAY_S:
+        base["state"] = "stationary" if len(history) >= 2 else "unknown"
+        dev_data["_proximity_last_state"] = base["state"]
+        tag_data["proximity"] = base
+        return base
+
+    if len(history) < 2:
+        base["state"] = "unknown"
+        dev_data["_proximity_last_state"] = "unknown"
+        tag_data["proximity"] = base
+        return base
+
+    curr = history[-1]
+    ref = None
+    for candidate in history[:-1]:
+        dt_cand = (curr["gps_date"] - candidate["gps_date"]).total_seconds()
+        if 0 < dt_cand <= PROXIMITY_MAX_GAP_S:
+            ref = candidate
+            break
+    if ref is None:
+        base["state"] = "unknown"
+        dev_data["_proximity_last_state"] = "unknown"
+        tag_data["proximity"] = base
+        return base
+
+    dt_s = (curr["gps_date"] - ref["gps_date"]).total_seconds()
+    delta_s = haversine_distance_m(ref["lat"], ref["lon"], curr["lat"], curr["lon"])
+    min_move_m = max(
+        PROXIMITY_MIN_MOVE_M,
+        PROXIMITY_ACCURACY_FACTOR * (ref["acc"] + curr["acc"]),
+    )
+
+    delta_home = (
+        (curr["dist_home"] - ref["dist_home"])
+        if curr["dist_home"] is not None and ref["dist_home"] is not None
+        else None
+    )
+    delta_work = (
+        (curr["dist_work"] - ref["dist_work"])
+        if curr["dist_work"] is not None and ref["dist_work"] is not None
+        else None
+    )
+    base["delta_home"] = _format_distance(delta_home, unit)
+    base["delta_work"] = _format_distance(delta_work, unit)
+    base["speed_kmh"] = round((delta_s / dt_s) * 3.6, 1) if dt_s > 0 else 0.0
+
+    if delta_s < min_move_m:
+        base["state"] = "stationary"
+        dev_data["_proximity_last_state"] = "stationary"
+        tag_data["proximity"] = base
+        return base
+
+    base["bearing_deg"] = round(
+        initial_bearing_deg(ref["lat"], ref["lon"], curr["lat"], curr["lon"]), 1
+    )
+
+    align_home = (-delta_home / delta_s) if delta_home is not None else None
+    align_work = (-delta_work / delta_s) if delta_work is not None else None
+    base["alignment_home"] = round(align_home, 2) if align_home is not None else None
+    base["alignment_work"] = round(align_work, 2) if align_work is not None else None
+
+    prev_state = dev_data.get("_proximity_last_state")
+    thresh_home = (
+        PROXIMITY_MIN_ALIGNMENT_KEEP if prev_state == "towards_home" else PROXIMITY_MIN_ALIGNMENT_ENTER
+    )
+    thresh_work = (
+        PROXIMITY_MIN_ALIGNMENT_KEEP if prev_state == "towards_work" else PROXIMITY_MIN_ALIGNMENT_ENTER
+    )
+
+    home_ok = (
+        delta_home is not None
+        and delta_home <= -min_move_m
+        and align_home is not None
+        and align_home >= thresh_home
+    )
+    work_ok = (
+        delta_work is not None
+        and delta_work <= -min_move_m
+        and align_work is not None
+        and align_work >= thresh_work
+    )
+
+    if home_ok and work_ok:
+        if abs(align_home - align_work) > PROXIMITY_COLLINEAR_MARGIN:
+            state = "towards_home" if align_home > align_work else "towards_work"
+        else:
+            state = "towards_home" if curr["dist_home"] <= curr["dist_work"] else "towards_work"
+    elif home_ok:
+        state = "towards_home"
+    elif work_ok:
+        state = "towards_work"
+    else:
+        state = "none"
+
+    base["state"] = state
+    dev_data["_proximity_last_state"] = state
+    tag_data["proximity"] = base
+    return base

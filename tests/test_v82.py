@@ -302,4 +302,16 @@ check(
     80,
 )
 
+# Mobile 'online' -> 'mobile', PC stays 'online'
+u.perform_fmm_operation = fake_operation(
+    {"oprnType": "CHECK_CONNECTION", "oprnStsCd": "2800", "oprnResultCode": "1200", "extra": {"isConnected": True}}
+)
+mob_data = {"name": "S23 Ultra", "device_id": "s23", "is_fmm": True, "web_device_type_code": "PHONE"}
+mob_res = asyncio.run(u.check_fmm_connection(MagicMock(), MagicMock(), "e", mob_data, use_cache=False))
+check("mobile device online CHECK_CONNECTION maps to 'mobile'", mob_res["state"], "mobile")
+
+pc_data = {"name": "PC", "device_id": "pc1", "is_fmm": True, "web_device_type_code": "PC"}
+pc_res = asyncio.run(u.check_fmm_connection(MagicMock(), MagicMock(), "e", pc_data, use_cache=False))
+check("PC device online CHECK_CONNECTION stays 'online'", pc_res["state"], "online")
+
 check.finish()

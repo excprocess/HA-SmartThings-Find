@@ -123,6 +123,7 @@ class UpdateLocationButton(ButtonEntity):
                 # message below doesn't lie about what just happened.
 
         self.coordinator.apply_position_policy(self.device, tag_data, new_fix, False)
+        self.coordinator.update_device_proximity(self.device, tag_data)
 
         if tag_data.get('location_found') and not tag_data.get('position_unknown'):
             update_device_maps_link(self.hass, device_id, tag_data.get('used_loc'))

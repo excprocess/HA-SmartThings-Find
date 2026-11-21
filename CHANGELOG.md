@@ -1,5 +1,26 @@
 # Changelog
 
+## 8.5.0
+
+### Added
+- **Proximity / Direction sensor (`<name> Direction`)**: new `ENUM` sensor (`at_home`, `at_work`, `towards_home`, `towards_work`, `stationary`, `none`, `unknown`) configured via native Home Assistant **Home** and **Work** zones and a selectable distance unit (`m` / `km`) in the integration options.
+  - Created only for **SmartTags** (always active) and **active-connectable devices** (phones, tablets, PCs — active only while their `Active Location` switch is on, otherwise `unknown`); never created for passive FMM devices (Buds, watches).
+  - Exposes `distance_home_<unit>`, `distance_work_<unit>`, `delta_home_<unit>`, `delta_work_<unit>`, `speed_kmh`, `bearing_deg`, `alignment_home`, `alignment_work`, `samples_used`, and `last_fix_at`.
+  - Built-in anti-false-positive safeguards: Haversine + projection ratio with entry/keep hysteresis, dynamic accuracy-aware anti-jitter threshold, coarse-fix (`> 300 m`) and implausible-speed (`> 250 km/h`) filtering, time-gap window reset (`30 min`), temporal movement decay (`15 min`), collinear Home/Work tie-breaking, and `position_unknown` integration.
+- **Local integration brand icons**: added `custom_components/smartthings_find/brand/{icon,icon@2x,logo,logo@2x}.png`.
+
+### Changed
+- **Mobile connection state labeling**: for phones and tablets, an online `CHECK_CONNECTION` without Wi-Fi `netType` is now reported as **`mobile`** instead of `online` (PCs continue to report `online`).
+- **PC low-accuracy warning excluded**: Windows PCs routinely report ~200–500 m Wi-Fi geolocation accuracy; they no longer trigger the low-accuracy warning flag on `Location Retrieval Error`.
+- **Galaxy Buds detection & `CHECK_CONNECTION` battery refresh**: broadened Buds detection (matching `subType` values like `CANAL`/`CANAL2`/`OPEN`, `HEARABLE`, and device name/model) so Buds reliably get their icon and separate `Left Battery` / `Right Battery` sensors; enabled `CHECK_CONNECTION` during opted-in active polls and manual `Update Location` for all FMM devices so Buds/Watch battery channels refresh.
+
+### Fixed
+- **Eliminated `device_tracker` `last_updated` / `last_changed` churn**: `SmartThingsDeviceTracker` now compares a snapshot of actual position/availability/mode and skips `async_write_ha_state()` when a poll returns the exact same fix, preventing passive or unchanged devices from advancing their tracker timestamps on every poll. Also removed duplicate/internal fields (`dev_id`, `name`, `update_success`, `location_found`, battery fields) from `device_tracker` attributes.
+- **Diagnostics redaction**: added `user_auth_token`, `login_id`, and FMM web/request identifiers (`web_usr_id`, `usrId`, `web_dvce_id`, `dvceID`, `fmmDevId`, `reqId`) to `TO_REDACT` in `diagnostics.py`.
+- **Power Saving binary sensor updates**: `DevicePowerSavingSensor` now inherits `CoordinatorEntity` so SmartTag power-saving metadata refreshes with coordinator updates instead of staying frozen at startup.
+- **Reconfigure flow**: `async_step_reconfigure` now updates the existing config entry instead of creating a duplicate entry.
+- **Tablet Ring switch**: `FmmRingSwitch` now uses `is_phone_device(...)` so Samsung tablets also receive the Ring switch.
+
 ## 8.3.0
 
 ### Added
