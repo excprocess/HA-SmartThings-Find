@@ -3469,12 +3469,14 @@ def resolve_device_battery_value(
 # Proximity & Direction (Home / Work)
 # ---------------------------------------------------------------------------------------------
 DIRECTION_STATES = (
-    "at_home",
-    "at_work",
+    "arrived_home",
+    "arrived_work",
     "towards_home",
     "towards_work",
+    "away_from_home",
+    "away_from_work",
+    "away",
     "stationary",
-    "none",
     "unknown",
 )
 
@@ -3616,11 +3618,11 @@ def update_proximity_state(
     in_home = dist_home is not None and dist_home <= home_zone["radius"]
     in_work = dist_work is not None and dist_work <= work_zone["radius"]
     if in_home and in_work:
-        zone_state = "at_home" if dist_home <= dist_work else "at_work"
+        zone_state = "arrived_home" if dist_home <= dist_work else "arrived_work"
     elif in_home:
-        zone_state = "at_home"
+        zone_state = "arrived_home"
     elif in_work:
-        zone_state = "at_work"
+        zone_state = "arrived_work"
     else:
         zone_state = None
 
@@ -3754,7 +3756,31 @@ def update_proximity_state(
     elif work_ok:
         state = "towards_work"
     else:
-        state = "none"
+        away_thresh_home = (
+            PROXIMITY_MIN_ALIGNMENT_KEEP if prev_state == "away_from_home" else PROXIMITY_MIN_ALIGNMENT_ENTER
+        )
+        away_thresh_work = (
+            PROXIMITY_MIN_ALIGNMENT_KEEP if prev_state == "away_from_work" else PROXIMITY_MIN_ALIGNMENT_ENTER
+        )
+        home_away = (
+            delta_home is not None
+            and delta_home >= min_move_m
+            and align_home is not None
+            and align_home <= -away_thresh_home
+        )
+        work_away = (
+            delta_work is not None
+            and delta_work >= min_move_m
+            and align_work is not None
+            and align_work <= -away_thresh_work
+        )
+        if home_away and not work_away:
+            state = "away_from_home"
+        elif work_away and not home_away:
+            state = "away_from_work"
+        else:
+            # Moving away from both zones, or moving laterally/neutrally.
+            state = "away"
 
     base["state"] = state
     dev_data["_proximity_last_state"] = state

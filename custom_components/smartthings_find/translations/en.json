@@ -41,5 +41,22 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "direction": {
+        "state": {
+          "arrived_home": "Arrived at Home",
+          "arrived_work": "Arrived at Work",
+          "towards_home": "Towards Home",
+          "towards_work": "Towards Work",
+          "away_from_home": "Away from Home",
+          "away_from_work": "Away from Work",
+          "away": "Away",
+          "stationary": "Stationary",
+          "unknown": "Unknown"
+        }
+      }
+    }
   }
 }

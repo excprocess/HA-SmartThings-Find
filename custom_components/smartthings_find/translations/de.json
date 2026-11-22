@@ -41,5 +41,22 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "direction": {
+        "state": {
+          "arrived_home": "Zuhause angekommen",
+          "arrived_work": "Bei der Arbeit angekommen",
+          "towards_home": "Richtung Zuhause",
+          "towards_work": "Richtung Arbeit",
+          "away_from_home": "Weg von Zuhause",
+          "away_from_work": "Weg von der Arbeit",
+          "away": "Unterwegs",
+          "stationary": "Stationär",
+          "unknown": "Unbekannt"
+        }
+      }
+    }
   }
 }

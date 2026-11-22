@@ -3,10 +3,14 @@
 ## 8.5.0
 
 ### Added
-- **Proximity / Direction sensor (`<name> Direction`)**: new `ENUM` sensor (`at_home`, `at_work`, `towards_home`, `towards_work`, `stationary`, `none`, `unknown`) configured via native Home Assistant **Home** and **Work** zones and a selectable distance unit (`m` / `km`) in the integration options.
+- **Proximity / Direction sensor (`<name> Direction`)**: new `ENUM` sensor with translated states (`arrived_home`, `arrived_work`, `towards_home`, `towards_work`, `away_from_home`, `away_from_work`, `away`, `stationary`, `unknown`) configured via native Home Assistant **Home** and **Work** zones and a selectable distance unit (`m` / `km`) in the integration options.
   - Created only for **SmartTags** (always active) and **active-connectable devices** (phones, tablets, PCs — active only while their `Active Location` switch is on, otherwise `unknown`); never created for passive FMM devices (Buds, watches).
   - Exposes `distance_home_<unit>`, `distance_work_<unit>`, `delta_home_<unit>`, `delta_work_<unit>`, `speed_kmh`, `bearing_deg`, `alignment_home`, `alignment_work`, `samples_used`, and `last_fix_at`.
   - Built-in anti-false-positive safeguards: Haversine + projection ratio with entry/keep hysteresis, dynamic accuracy-aware anti-jitter threshold, coarse-fix (`> 300 m`) and implausible-speed (`> 250 km/h`) filtering, time-gap window reset (`30 min`), temporal movement decay (`15 min`), collinear Home/Work tie-breaking, and `position_unknown` integration.
+- **Bundled SmartThings Find Lovelace cards (One UI & Material Design 3 / Material You)**: auto-registered directly by the integration (`/smartthings_find_frontend/smartthings-find-cards.js`) with native `<ha-map>` integration and visual GUI editors:
+  - `custom:smartthings-find-device-card`: single-device map widget with refresh and Ring action buttons, timestamp, zone, battery, and direction badges.
+  - `custom:smartthings-find-carousel-card`: multi-device map widget with floating speech-bubble header and horizontally scrollable device selector bar (auto-discovers all SmartThings Find trackers).
+  - Supports both **Samsung One UI** (`design: one_ui`) and **Material Design 3** (`design: md3`), automatically interfacing with **Material You Utilities** (`--md-sys-color-*`, `--md-sys-shape-*`, `--md-sys-motion-*`).
 - **Local integration brand icons**: added `custom_components/smartthings_find/brand/{icon,icon@2x,logo,logo@2x}.png`.
 
 ### Changed

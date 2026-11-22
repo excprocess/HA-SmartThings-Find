@@ -589,6 +589,7 @@ class DeviceDirectionSensor(CoordinatorEntity, SensorEntity):
     _attr_icon = "mdi:compass-outline"
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = list(DIRECTION_STATES)
+    _attr_translation_key = "direction"
 
     def __init__(self, hass: HomeAssistant, coordinator, device):
         super().__init__(coordinator)

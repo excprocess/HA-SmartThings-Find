@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
+import json
 import logging
+from pathlib import Path
 import time
 import aiohttp
 from homeassistant.core import HomeAssistant
@@ -79,14 +81,56 @@ def _parse_iso(value):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+FRONTEND_URL_BASE = "/smartthings_find_frontend"
+FRONTEND_CARDS_JS = "smartthings-find-cards.js"
+
+
+async def _async_register_frontend_cards(hass: HomeAssistant) -> None:
+    """Serve and auto-register the bundled Lovelace cards once per HA instance."""
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if domain_data.get("_frontend_registered"):
+        return
+    http = getattr(hass, "http", None)
+    if http is None:
+        return
+    frontend_dir = Path(__file__).parent / "frontend"
+    if not (frontend_dir / FRONTEND_CARDS_JS).is_file():
+        return
+    try:
+        try:
+            from homeassistant.components.http import StaticPathConfig
+            await http.async_register_static_paths(
+                [StaticPathConfig(FRONTEND_URL_BASE, str(frontend_dir), cache_headers=False)]
+            )
+        except ImportError:
+            http.register_static_path(FRONTEND_URL_BASE, str(frontend_dir), cache_headers=False)
+
+        version = "8.5.0"
+        manifest_path = Path(__file__).parent / "manifest.json"
+        if manifest_path.is_file():
+            try:
+                version = json.loads(manifest_path.read_text(encoding="utf-8")).get("version", version)
+            except Exception:
+                pass
+
+        from homeassistant.components.frontend import add_extra_js_url
+        add_extra_js_url(hass, f"{FRONTEND_URL_BASE}/{FRONTEND_CARDS_JS}?v={version}")
+        domain_data["_frontend_registered"] = True
+        _LOGGER.debug("Registered SmartThings Find Lovelace cards (v%s)", version)
+    except Exception:
+        _LOGGER.debug("Unable to register SmartThings Find frontend cards", exc_info=True)
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the SmartThings Find component."""
     hass.data[DOMAIN] = {}
+    await _async_register_frontend_cards(hass)
     return True
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up SmartThings Find from a config entry."""
-    
+    hass.data.setdefault(DOMAIN, {})
+    await _async_register_frontend_cards(hass)
     hass.data[DOMAIN][entry.entry_id] = {}
 
     # Load the tokens from the config

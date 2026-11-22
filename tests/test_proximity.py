@@ -55,7 +55,7 @@ check("phone with Active Location off -> distance_home None", res["distance_home
 # --- 3. SmartTag is always active (even without active_location_requested) -------------------
 tag_dev = {"is_tracker": True}
 res = u.update_proximity_state(tag_dev, make_tag(41.9001, 12.5000, t0), HOME, WORK, now=t0)
-check("SmartTag inside Home -> at_home", res["state"], "at_home")
+check("SmartTag inside Home -> arrived_home", res["state"], "arrived_home")
 check("SmartTag distance_home in meters", res["distance_home"] < 20, True)
 
 # --- 4. Real movement towards Home (southbound from halfway between Work and Home) -----------
@@ -91,7 +91,31 @@ u.update_proximity_state(p_perp, make_tag(41.9250, 12.5000, t0), HOME, WORK, now
 res_perp = u.update_proximity_state(
     p_perp, make_tag(41.9250, 12.5120, t0 + timedelta(minutes=2)), HOME, WORK, now=t0 + timedelta(minutes=2)
 )
-check("eastbound perpendicular movement -> none", res_perp["state"], "none")
+check("eastbound perpendicular movement -> away", res_perp["state"], "away")
+
+# --- 7b. Moving away from Home only (Work not configured) -> away_from_home ------------------
+p_ah = active_phone(True)
+u.update_proximity_state(p_ah, make_tag(41.9100, 12.5000, t0), HOME, None, now=t0)
+res_ah = u.update_proximity_state(
+    p_ah, make_tag(41.9200, 12.5000, t0 + timedelta(minutes=2)), HOME, None, now=t0 + timedelta(minutes=2)
+)
+check("northbound away from Home (no Work zone) -> away_from_home", res_ah["state"], "away_from_home")
+
+# --- 7c. Moving away from Work only (Home not configured) -> away_from_work ------------------
+p_aw = active_phone(True)
+u.update_proximity_state(p_aw, make_tag(41.9600, 12.5000, t0), None, WORK, now=t0)
+res_aw = u.update_proximity_state(
+    p_aw, make_tag(41.9700, 12.5000, t0 + timedelta(minutes=2)), None, WORK, now=t0 + timedelta(minutes=2)
+)
+check("northbound away from Work (no Home zone) -> away_from_work", res_aw["state"], "away_from_work")
+
+# --- 7d. Moving away from BOTH Home and Work -> away -----------------------------------------
+p_ab = active_phone(True)
+u.update_proximity_state(p_ab, make_tag(41.9600, 12.5000, t0), HOME, WORK, now=t0)
+res_ab = u.update_proximity_state(
+    p_ab, make_tag(41.9700, 12.5000, t0 + timedelta(minutes=2)), HOME, WORK, now=t0 + timedelta(minutes=2)
+)
+check("northbound away from both Home and Work -> away", res_ab["state"], "away")
 
 # --- 8. Collinear Home & Work (moving south from north of Work -> closer target Work wins) ---
 p_col = active_phone(True)
@@ -137,6 +161,6 @@ check("position_unknown -> distance_home None", res_unk["distance_home"], None)
 overlap_work = {"entity_id": "zone.work", "latitude": 41.9000, "longitude": 12.5000, "radius": 100.0}
 p_ov = active_phone(True)
 res_ov = u.update_proximity_state(p_ov, make_tag(41.9000, 12.5000, t0), HOME, overlap_work, now=t0)
-check("identical Home & Work zones -> at_home wins", res_ov["state"], "at_home")
+check("identical Home & Work zones -> arrived_home wins", res_ov["state"], "arrived_home")
 
 check.finish()

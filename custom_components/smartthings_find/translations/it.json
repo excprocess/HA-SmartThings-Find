@@ -1,0 +1,62 @@
+{
+  "config": {
+    "abort": {
+      "reauth_successful": "Riautenticazione completata con successo."
+    },
+    "step": {
+      "user": {
+        "title": "Accesso SmartThings Find",
+        "description": "Inizializzazione accesso..."
+      },
+      "auth_code": {
+        "title": "Accesso SmartThings Find",
+        "description": "Clicca [qui]({login_url}) per accedere.\n\nDopo il login, copia l'intero URL ms-app:// a cui vieni reindirizzato (anche se mostra un errore) e incollalo qui sotto. Non incollare l'URL della pagina di errore visibile. Se il browser chiede di aprire un'app esterna per il link ms-app, annulla.\n\nCome ottenere l'URL ms-app:\n1) Tieni aperta la scheda del browser dopo il login.\n2) Apri gli Strumenti per sviluppatori (F12) e vai su Rete (Network) o Console.\n3) Cerca un URL che inizia con ms-app:// e copialo per intero.",
+        "data": {
+          "redirect_url": "URL di reindirizzamento"
+        }
+      }
+    },
+    "error": {
+      "login_error": "Inizializzazione fallita: {error_msg}",
+      "auth_failed": "Autenticazione fallita: {error_msg}"
+    },
+    "progress": {
+      "task_stage_one": "Preparazione in corso, attendere...",
+      "task_stage_two": "Per accedere clicca [qui]({url}) per aprire la pagina di login nel browser.\n\nNon riesci ad aprire il link? Vai su [signin.samsung.com/key](https://signin.samsung.com/key/) e inserisci il seguente codice:\n\n## ```{code}```\n"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "description": "I telefoni usano l'intervallo in zona o quello generale. Buds, PC e orologi usano un intervallo unico dedicato quando il loro interruttore Active Location è attivo; quando è spento vengono interrogati passivamente con l'intervallo in zona o generale. I dispositivi passivi (Buds, orologi) e gli SmartTag mantengono sempre l'ultima posizione nota. Il sensore Direzione/Prossimità viene creato solo per gli SmartTag (sempre attivo) e i dispositivi attivi (telefoni, tablet, PC — attivo solo con Active Location acceso, altrimenti sconosciuto); non viene creato per i dispositivi passivi (Buds, orologi).",
+        "data": {
+          "update_interval": "Intervallo di aggiornamento (secondi), usato fuori da qualsiasi zona",
+          "update_interval_in_zone": "Intervallo di aggiornamento dentro una zona (secondi, 0 = uguale a quello generale)",
+          "active_passive_device_interval": "Intervallo attivo per Buds, PC e orologi (secondi; unico dentro e fuori dalle zone)",
+          "excluded_devices": "Dispositivi da escludere dal tracciamento (nessun polling, nessuna entità)",
+          "unknown_after_failed_attempts": "Mostra posizione come sconosciuta dopo N tentativi attivi falliti (telefoni, tablet e PC con Active Location attivo; 0 = mai)",
+          "proximity_home_zone": "Zona Casa per il sensore Direzione/Prossimità (opzionale; richiede Active Location su telefoni/tablet/PC, sempre attivo su SmartTag)",
+          "proximity_work_zone": "Zona Lavoro per il sensore Direzione/Prossimità (opzionale; richiede Active Location su telefoni/tablet/PC, sempre attivo su SmartTag)",
+          "proximity_distance_unit": "Unità di misura delle distanze negli attributi del sensore Direzione/Prossimità"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "direction": {
+        "state": {
+          "arrived_home": "Arrivato a Casa",
+          "arrived_work": "Arrivato al Lavoro",
+          "towards_home": "Verso Casa",
+          "towards_work": "Verso il Lavoro",
+          "away_from_home": "Lontano da Casa",
+          "away_from_work": "Lontano dal Lavoro",
+          "away": "In movimento",
+          "stationary": "Fermo",
+          "unknown": "Sconosciuto"
+        }
+      }
+    }
+  }
+}
