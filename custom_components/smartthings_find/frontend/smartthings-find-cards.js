@@ -10,7 +10,7 @@
  * (`--md-sys-color-*`, `--md-sys-shape-*`, `--md-sys-motion-*`).
  */
 
-const CARD_VERSION = "8.5.6";
+const CARD_VERSION = "8.5.9";
 
 // Crisp geometric One UI / MD3 SVG icons
 const ICON_REFRESH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>`;
@@ -83,6 +83,7 @@ function findCompanionEntities(hass, trackerEntityId) {
     leftBatterySensor: null,
     rightBatterySensor: null,
     directionSensor: null,
+    connectionSensor: null,
     locationSensor: null,
     mapsLinkSensor: null,
   };
@@ -100,6 +101,7 @@ function findCompanionEntities(hass, trackerEntityId) {
       else if (eid.startsWith("sensor.") && eid.endsWith("_right_battery")) out.rightBatterySensor = eid;
       else if (eid.startsWith("sensor.") && eid.endsWith("_battery")) out.batterySensor = eid;
       else if (eid.startsWith("sensor.") && eid.endsWith("_direction")) out.directionSensor = eid;
+      else if (eid.startsWith("sensor.") && eid.endsWith("_connection")) out.connectionSensor = eid;
       else if (eid.startsWith("sensor.") && eid.endsWith("_location")) out.locationSensor = eid;
       else if (eid.startsWith("sensor.") && eid.endsWith("_maps_link")) out.mapsLinkSensor = eid;
     }
@@ -113,6 +115,7 @@ function findCompanionEntities(hass, trackerEntityId) {
     ["leftBatterySensor", `sensor.${slug}_left_battery`],
     ["rightBatterySensor", `sensor.${slug}_right_battery`],
     ["directionSensor", `sensor.${slug}_direction`],
+    ["connectionSensor", `sensor.${slug}_connection`],
     ["locationSensor", `sensor.${slug}_location`],
     ["mapsLinkSensor", `sensor.${slug}_maps_link`],
   ];
@@ -172,6 +175,35 @@ function fireMoreInfo(node, entityId) {
 
 function isDarkMode(hass) {
   return Boolean(hass?.themes?.darkMode);
+}
+
+/**
+ * Center `<ha-map>`'s internal Leaflet map on `[lat, lon]` with a vertical pixel offset
+ * so the device marker sits clearly below top floating pills (positive markerShiftDownPx)
+ * or above bottom scrims (negative markerShiftDownPx). Idempotent (no cumulative drift).
+ */
+async function centerMapWithOffset(mapEl, lat, lon, zoom, markerShiftDownPx) {
+  if (!mapEl || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  for (let i = 0; i < 20; i++) {
+    if (mapEl.leafletMap && mapEl.Leaflet) break;
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  const lmap = mapEl.leafletMap;
+  const L = mapEl.Leaflet;
+  if (!lmap || !L) return;
+  setTimeout(() => {
+    try {
+      lmap.invalidateSize();
+      const targetZoom = Number(zoom) || lmap.getZoom() || 15;
+      const pt = lmap.project(L.latLng(lat, lon), targetZoom);
+      // Moving map center UP (smaller Y) shifts the marker DOWN on screen
+      pt.y -= markerShiftDownPx;
+      const offsetCenter = lmap.unproject(pt, targetZoom);
+      lmap.setView(offsetCenter, targetZoom, { animate: false });
+    } catch (_e) {
+      // Ignore transient layout states
+    }
+  }, 140);
 }
 
 function haversineMeters(lat1, lon1, lat2, lon2) {
@@ -412,6 +444,19 @@ const SHARED_THEME_CSS = `
     to { transform: rotate(360deg); }
   }
 
+  .badge-offline {
+    background: rgba(217, 48, 37, 0.16) !important;
+    color: #D93025 !important;
+  }
+  .dark .badge-offline {
+    background: rgba(242, 139, 130, 0.22) !important;
+    color: #F28B82 !important;
+  }
+  .design-md3 .badge-offline {
+    background: var(--md-sys-color-error-container, rgba(217, 48, 37, 0.16)) !important;
+    color: var(--md-sys-color-on-error-container, #B3261E) !important;
+  }
+
   .empty-state {
     display: flex;
     align-items: center;
@@ -441,6 +486,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     this._selectedIdx = 0;
     this._loading = false;
     this._mapEl = null;
+    this._historyLayer = null;
     this._onKeyDown = (e) => {
       if (e.key === "Escape") this.close();
     };
@@ -453,6 +499,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     this._selectedDate = new Date();
     this._stops = [];
     this._selectedIdx = 0;
+    this._historyLayer = null;
     this._renderShell();
     document.body.appendChild(this);
     window.addEventListener("keydown", this._onKeyDown);
@@ -462,6 +509,24 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
   close() {
     window.removeEventListener("keydown", this._onKeyDown);
     if (this.parentNode) this.parentNode.removeChild(this);
+  }
+
+  _getResolvedAccent() {
+    const dialog = this.shadowRoot.querySelector(".dialog");
+    if (dialog) {
+      const val = getComputedStyle(dialog).getPropertyValue("--stf-accent").trim();
+      if (val) return val;
+    }
+    return this._design === "md3" ? "#0B57D0" : "#387AFF";
+  }
+
+  _getResolvedSurface() {
+    const dialog = this.shadowRoot.querySelector(".dialog");
+    if (dialog) {
+      const val = getComputedStyle(dialog).getPropertyValue("--stf-surface").trim();
+      if (val) return val;
+    }
+    return isDarkMode(this._hass) ? "#1C1C1E" : "#FFFFFF";
   }
 
   _renderShell() {
@@ -480,17 +545,19 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           align-items: center;
           justify-content: center;
         }
+        /* Clean darkened scrim without blur */
         .backdrop {
           position: fixed;
           inset: 0;
-          background: rgba(0, 0, 0, 0.56);
-          backdrop-filter: blur(4px);
-          animation: stf-fade-in 180ms ease;
+          background: rgba(0, 0, 0, 0.52);
+          animation: stf-fade-in 160ms ease;
         }
         @keyframes stf-fade-in {
           from { opacity: 0; }
           to { opacity: 1; }
         }
+
+        /* ==================== BASE DIALOG ==================== */
         .dialog {
           position: relative;
           z-index: 2;
@@ -499,18 +566,108 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           display: flex;
           flex-direction: column;
           overflow: hidden;
-          border-radius: var(--stf-radius);
+          border-radius: 26px;
           background: var(--stf-surface);
           color: var(--stf-on-surface);
           border: 1px solid var(--stf-outline);
           box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
           font-family: var(--stf-font);
-          animation: stf-pop-in 220ms var(--stf-ease-standard);
+          animation: stf-pop-in 200ms var(--stf-ease-standard);
         }
         @keyframes stf-pop-in {
-          from { opacity: 0; transform: translateY(16px) scale(0.97); }
+          from { opacity: 0; transform: translateY(14px) scale(0.98); }
           to { opacity: 1; transform: translateY(0) scale(1); }
         }
+
+        /* ==================== MD3 DIALOG OVERRIDES (100% Material Design 3) ==================== */
+        .dialog.design-md3 {
+          border-radius: 28px;
+          background: var(--md-sys-color-surface-container-high, var(--stf-surface-elevated));
+          border: none;
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28);
+        }
+        .dialog.design-md3 .dlg-header {
+          padding: 18px 16px 12px 24px;
+          background: transparent;
+          border-bottom: none;
+        }
+        .dialog.design-md3 .dlg-back {
+          display: none;
+        }
+        .dialog.design-md3 .dlg-title {
+          font-size: 22px;
+          font-weight: 400;
+          letter-spacing: 0;
+        }
+        .dialog.design-md3 .dlg-subtitle {
+          font-size: 13px;
+          margin-top: 2px;
+        }
+        .dialog.design-md3 .dlg-close {
+          background: var(--md-sys-color-surface-container-highest, var(--stf-surface-muted));
+          color: var(--md-sys-color-on-surface-variant, var(--stf-on-surface));
+        }
+        .dialog.design-md3 .dlg-map-wrap {
+          margin: 0 16px 12px;
+          border-radius: 20px;
+          flex: 0 0 40%;
+          border: 1px solid var(--md-sys-color-outline-variant, transparent);
+        }
+        .dialog.design-md3 .dlg-sheet {
+          margin-top: 0;
+          border-radius: 0;
+          box-shadow: none;
+          background: transparent;
+        }
+        .dialog.design-md3 .day-bar {
+          margin: 0 16px 8px;
+          padding: 6px 8px;
+          border-bottom: none;
+          border-radius: 9999px;
+          background: var(--md-sys-color-surface-container, var(--stf-surface));
+        }
+        .dialog.design-md3 .day-nav-btn {
+          width: 36px;
+          height: 36px;
+          background: transparent;
+          color: var(--md-sys-color-on-surface-variant, var(--stf-on-surface));
+        }
+        .dialog.design-md3 .day-nav-btn:hover:not(:disabled) {
+          background: var(--md-sys-color-surface-container-highest, var(--stf-surface-muted));
+        }
+        .dialog.design-md3 .day-label-wrap {
+          font-size: 14px;
+          font-weight: 500;
+          letter-spacing: 0.01em;
+        }
+        .dialog.design-md3 .timeline-list {
+          padding: 6px 16px 18px;
+          gap: 6px;
+        }
+        .dialog.design-md3 .tl-card {
+          margin: 3px 0 3px 4px;
+          padding: 12px 16px;
+          border-radius: 16px;
+          background: var(--md-sys-color-surface-container, var(--stf-surface));
+          color: var(--md-sys-color-on-surface, var(--stf-on-surface));
+        }
+        .dialog.design-md3 .tl-row.active .tl-card {
+          background: var(--md-sys-color-secondary-container, var(--stf-accent-soft));
+          color: var(--md-sys-color-on-secondary-container, var(--stf-accent-text));
+        }
+        .dialog.design-md3 .tl-maps-chip {
+          display: inline-flex;
+          align-items: center;
+          padding: 2px 10px;
+          border-radius: 8px;
+          border: 1px solid var(--md-sys-color-outline, rgba(0, 0, 0, 0.25));
+          text-decoration: none;
+          font-size: 11px;
+          font-weight: 500;
+          color: inherit;
+        }
+
+        /* ==================== ONE UI HEADER & SHEET ==================== */
         .dlg-header {
           display: flex;
           align-items: center;
@@ -571,22 +728,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           width: 100%;
           height: 100%;
         }
-        .dlg-map-fade {
-          position: absolute;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          height: 28px;
-          pointer-events: none;
-          z-index: 400;
-          background: linear-gradient(to top, var(--stf-surface) 0%, transparent 100%);
-          display: none;
-        }
-        .design-md3 .dlg-map-fade {
-          display: block;
-        }
 
-        /* Bottom Sheet / Day Switcher (One UI rounded sheet top) */
         .dlg-sheet {
           flex: 1;
           min-height: 0;
@@ -599,11 +741,6 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           position: relative;
           z-index: 410;
           box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
-        }
-        .design-md3 .dlg-sheet {
-          margin-top: 0;
-          border-radius: 0;
-          box-shadow: none;
         }
         .day-bar {
           display: flex;
@@ -625,9 +762,6 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           justify-content: center;
           cursor: pointer;
           transition: background-color 150ms ease, opacity 150ms ease;
-        }
-        .design-md3 .day-nav-btn {
-          background: var(--stf-surface-elevated);
         }
         .day-nav-btn:hover:not(:disabled) {
           background: var(--stf-surface-muted);
@@ -667,7 +801,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           cursor: pointer;
         }
 
-        /* Timeline list (One UI & MD3) */
+        /* ==================== TIMELINE LIST ==================== */
         .timeline-list {
           flex: 1;
           overflow-y: auto;
@@ -732,6 +866,12 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           background: var(--stf-surface);
           border: 2px solid var(--stf-on-surface-muted);
         }
+        .design-md3 .tl-dot {
+          width: 9px;
+          height: 9px;
+          background: var(--md-sys-color-surface-container-high, var(--stf-surface));
+          border: 2px solid var(--md-sys-color-outline, var(--stf-on-surface-muted));
+        }
         .tl-pin {
           position: relative;
           z-index: 2;
@@ -748,6 +888,15 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           width: 20px;
           height: 20px;
         }
+        .tl-md3-node {
+          position: relative;
+          z-index: 2;
+          width: 14px;
+          height: 14px;
+          border-radius: 9999px;
+          background: var(--stf-accent);
+          box-shadow: 0 0 0 4px var(--md-sys-color-primary-container, var(--stf-accent-soft));
+        }
         .tl-card {
           position: relative;
           margin: 6px 0 6px 6px;
@@ -757,7 +906,6 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           color: var(--stf-on-surface);
           transition: background-color 180ms var(--stf-ease-standard), color 180ms var(--stf-ease-standard);
         }
-        /* One UI speech notch on left of timeline card */
         .design-one_ui .tl-card::before {
           content: "";
           position: absolute;
@@ -783,13 +931,13 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           font-weight: 600;
         }
         .tl-meta {
-          margin-top: 4px;
+          margin-top: 5px;
           display: flex;
           align-items: center;
           justify-content: space-between;
           gap: 8px;
           font-size: 11.5px;
-          opacity: 0.78;
+          opacity: 0.82;
         }
         .tl-maps-link {
           color: inherit;
@@ -806,16 +954,14 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
       <div class="backdrop"></div>
       <div class="dialog stf-shell design-${this._design}${dark ? " dark" : ""}">
         <div class="dlg-header">
-          <button class="dlg-back" aria-label="Close">${ICON_CHEVRON_LEFT}</button>
+          <button class="dlg-back" aria-label="Back">${ICON_CHEVRON_LEFT}</button>
           <div class="dlg-titles">
             <div class="dlg-title">Location history</div>
             <div class="dlg-subtitle">${devName}</div>
           </div>
           <button class="dlg-close" aria-label="Close">${ICON_CLOSE}</button>
         </div>
-        <div class="dlg-map-wrap">
-          <div class="dlg-map-fade"></div>
-        </div>
+        <div class="dlg-map-wrap"></div>
         <div class="dlg-sheet">
           <div class="day-bar">
             <button class="day-nav-btn btn-prev" aria-label="Previous day">${ICON_CHEVRON_LEFT}</button>
@@ -854,14 +1000,134 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
 
     ensureHaMapLoaded().then(() => {
       if (!this._mapEl && this._mapWrap) {
+        const darkMode = isDarkMode(this._hass);
         const map = document.createElement("ha-map");
+        map.hass = this._hass;
+        map.darkMode = darkMode;
+        map.themeMode = darkMode ? "dark" : "light";
+        map.autoFit = false;
+        map.fitZones = false;
+        map.interactiveZones = false;
+        map.entities = [];
         this._mapEl = map;
-        this._mapWrap.insertBefore(map, this._mapWrap.firstChild);
-        this._updateMap();
+        this._mapWrap.appendChild(map);
+        this._waitForLeafletAndDraw(true);
       }
     });
 
     this._updateDayHeader();
+  }
+
+  async _waitForLeafletAndDraw(fitAll) {
+    if (!this._mapEl) return;
+    // Wait up to 2.5s for <ha-map> to instantiate its internal Leaflet map
+    for (let attempt = 0; attempt < 25; attempt++) {
+      if (this._mapEl.leafletMap && this._mapEl.Leaflet) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const lmap = this._mapEl.leafletMap;
+    if (!lmap) return;
+    setTimeout(() => {
+      try { lmap.invalidateSize(); } catch (_e) {}
+      this._drawHistoryOnLeaflet(fitAll);
+    }, 120);
+  }
+
+  _drawHistoryOnLeaflet(fitAll = false) {
+    const lmap = this._mapEl?.leafletMap;
+    const L = this._mapEl?.Leaflet;
+    if (!lmap || !L) return;
+
+    const darkMode = isDarkMode(this._hass);
+    this._mapEl.darkMode = darkMode;
+    this._mapEl.themeMode = darkMode ? "dark" : "light";
+
+    if (this._historyLayer) {
+      try { lmap.removeLayer(this._historyLayer); } catch (_e) {}
+    }
+    this._historyLayer = L.layerGroup().addTo(lmap);
+
+    if (!this._stops.length) {
+      // Fall back to current entity coordinates instead of Amsterdam
+      const st = this._hass?.states?.[this._entityId];
+      const lat = Number(st?.attributes?.latitude);
+      const lon = Number(st?.attributes?.longitude);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        lmap.setView([lat, lon], 15, { animate: false });
+      }
+      return;
+    }
+
+    const accent = this._getResolvedAccent();
+    const surface = this._getResolvedSurface();
+
+    // Stops are newest-first; reverse for chronological polyline path
+    const chronoCoords = [...this._stops].reverse().map((s) => [s.lat, s.lon]);
+    if (chronoCoords.length >= 2) {
+      L.polyline(chronoCoords, {
+        color: accent,
+        weight: 4,
+        opacity: 0.88,
+        dashArray: this._design === "one_ui" ? "6, 8" : null,
+        lineCap: "round",
+        lineJoin: "round",
+      }).addTo(this._historyLayer);
+    }
+
+    // Draw stop markers (clickable to select in timeline)
+    this._stops.forEach((stop, idx) => {
+      const isActive = idx === this._selectedIdx;
+      if (isActive) {
+        // Active halo + bold pin marker
+        L.circleMarker([stop.lat, stop.lon], {
+          radius: 15,
+          color: accent,
+          weight: 0,
+          fillColor: accent,
+          fillOpacity: 0.24,
+        }).addTo(this._historyLayer);
+        L.circleMarker([stop.lat, stop.lon], {
+          radius: 8,
+          color: surface,
+          weight: 3,
+          fillColor: accent,
+          fillOpacity: 1,
+        })
+          .addTo(this._historyLayer)
+          .on("click", () => {
+            this._selectedIdx = idx;
+            this._renderTimeline();
+            this._drawHistoryOnLeaflet(false);
+          });
+      } else {
+        L.circleMarker([stop.lat, stop.lon], {
+          radius: 6,
+          color: accent,
+          weight: 2.5,
+          fillColor: surface,
+          fillOpacity: 1,
+        })
+          .addTo(this._historyLayer)
+          .on("click", () => {
+            this._selectedIdx = idx;
+            this._renderTimeline();
+            this._drawHistoryOnLeaflet(false);
+          });
+      }
+    });
+
+    const activeStop = this._stops[this._selectedIdx] || this._stops[0];
+    if (fitAll) {
+      if (chronoCoords.length >= 2) {
+        lmap.fitBounds(L.latLngBounds(chronoCoords), { padding: [34, 34], maxZoom: 16 });
+      } else if (activeStop) {
+        lmap.setView([activeStop.lat, activeStop.lon], 16, { animate: false });
+      }
+    } else if (activeStop) {
+      lmap.flyTo([activeStop.lat, activeStop.lon], Math.max(lmap.getZoom() || 15, 15), {
+        duration: 0.45,
+      });
+    }
   }
 
   _shiftDay(delta) {
@@ -917,13 +1183,11 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     }
 
     this._renderTimeline();
-    this._updateMap();
+    this._waitForLeafletAndDraw(true);
     this._hydrateAddresses();
   }
 
   _groupIntoStops(rawStates) {
-    // Stay & Move grouping inspired by konewka17/timeline_card:
-    // Collapse points within 120m (or same zone) into a single Stay interval.
     const points = [];
     for (const s of rawStates) {
       const attrs = s.attributes || {};
@@ -960,13 +1224,10 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
         });
       }
     }
-
-    // Reverse chronological order (newest at top, matching Samsung Find)
     return stays.reverse();
   }
 
   async _hydrateAddresses() {
-    // Gently resolve outside-zone addresses (up to 8 stops per day) via Nominatim
     let fetched = 0;
     for (let i = 0; i < this._stops.length && fetched < 8; i++) {
       const stop = this._stops[i];
@@ -981,37 +1242,13 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     }
   }
 
-  _updateMap() {
-    if (!this._mapEl || !this._hass || !this._entityId) return;
-    this._mapEl.hass = this._hass;
-    this._mapEl.darkMode = isDarkMode(this._hass);
-    this._mapEl.autoFit = true;
-    this._mapEl.fitZones = false;
-    this._mapEl.interactiveZones = false;
-
-    const now = new Date();
-    const startOfDay = new Date(this._selectedDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const hoursBack = Math.max(24, Math.ceil((now - startOfDay) / 3600000));
-    this._mapEl.hoursToShow = Math.min(hoursBack, 168);
-
-    const stop = this._stops[this._selectedIdx];
-    if (stop) {
-      this._mapEl.entities = [
-        { entity_id: this._entityId },
-        { latitude: stop.lat, longitude: stop.lon, name: stop.zoneState || formatTimeHM(stop.endDt) },
-      ];
-    } else {
-      this._mapEl.entities = [this._entityId];
-    }
-  }
-
   _renderTimeline() {
     if (!this._stops.length) {
       this._listEl.innerHTML = `<div class="tl-empty">No location history recorded for this day.</div>`;
       return;
     }
     this._listEl.innerHTML = "";
+    const isMd3 = this._design === "md3";
     this._stops.forEach((stop, idx) => {
       const isActive = idx === this._selectedIdx;
       const startHM = formatTimeHM(stop.startDt);
@@ -1029,19 +1266,24 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
         : durationMin > 0 ? `${durationMin} min` : "Point";
       const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${stop.lat},${stop.lon}`;
 
+      const nodeHtml = isActive
+        ? (isMd3 ? `<span class="tl-md3-node"></span>` : `<span class="tl-pin">${ICON_PIN_FILLED}</span>`)
+        : `<span class="tl-dot"></span>`;
+      const mapsHtml = isMd3
+        ? `<a class="tl-maps-chip" href="${mapsUrl}" target="_blank" rel="noopener">Open Maps</a>`
+        : `<a class="tl-maps-link" href="${mapsUrl}" target="_blank" rel="noopener">Maps</a>`;
+
       const row = document.createElement("div");
       row.className = `tl-row${isActive ? " active" : ""}`;
       row.dataset.stopIdx = String(idx);
       row.innerHTML = `
         <div class="tl-time">${timeHtml}</div>
-        <div class="tl-rail-col">
-          ${isActive ? `<span class="tl-pin">${ICON_PIN_FILLED}</span>` : `<span class="tl-dot"></span>`}
-        </div>
+        <div class="tl-rail-col">${nodeHtml}</div>
         <div class="tl-card">
           <div class="tl-addr">${label}</div>
           <div class="tl-meta">
             <span>${durText}</span>
-            <a class="tl-maps-link" href="${mapsUrl}" target="_blank" rel="noopener">Maps</a>
+            ${mapsHtml}
           </div>
         </div>
       `;
@@ -1049,7 +1291,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
         if (e.target.closest("a")) return;
         this._selectedIdx = idx;
         this._renderTimeline();
-        this._updateMap();
+        this._drawHistoryOnLeaflet(false);
       });
       this._listEl.appendChild(row);
     });
@@ -1357,8 +1599,10 @@ class SmartThingsFindDeviceCard extends HTMLElement {
   _syncMap() {
     if (!this._mapEl || !this._hass || !this._config.entity) return;
     const entityId = this._config.entity;
+    const dark = isDarkMode(this._hass);
     this._mapEl.hass = this._hass;
-    this._mapEl.darkMode = isDarkMode(this._hass);
+    this._mapEl.darkMode = dark;
+    this._mapEl.themeMode = dark ? "dark" : "light";
     this._mapEl.defaultZoom = Number(this._config.default_zoom) || 15;
     this._mapEl.autoFit = true;
     this._mapEl.fitZones = false;
@@ -1368,6 +1612,13 @@ class SmartThingsFindDeviceCard extends HTMLElement {
       this._mapEl.entities = [entityId];
       this._lastMapEntity = entityId;
       this._lastMapCoords = key;
+      const st = this._hass.states[entityId];
+      const lat = Number(st?.attributes?.latitude);
+      const lon = Number(st?.attributes?.longitude);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        // Shift marker slightly up (-18px) so it clears the bottom info block
+        centerMapWithOffset(this._mapEl, lat, lon, Number(this._config.default_zoom) || 15, -18);
+      }
     }
   }
 
@@ -1389,7 +1640,9 @@ class SmartThingsFindDeviceCard extends HTMLElement {
     const companions = findCompanionEntities(this._hass, this._config.entity);
     const locState = companions.locationSensor ? this._hass.states[companions.locationSensor] : null;
     const dirState = companions.directionSensor ? this._hass.states[companions.directionSensor] : null;
+    const connState = companions.connectionSensor ? this._hass.states[companions.connectionSensor] : null;
     const ringState = companions.ringSwitch ? this._hass.states[companions.ringSwitch] : null;
+    const isOffline = Boolean(connState && connState.state === "offline");
 
     this._tsEl.textContent = formatLastUpdated(this._hass, st, locState) || "—";
     this._nameEl.textContent = st?.attributes?.friendly_name || this._config.entity;
@@ -1399,7 +1652,9 @@ class SmartThingsFindDeviceCard extends HTMLElement {
       const formattedZone = this._hass.formatEntityState ? this._hass.formatEntityState(st) : st.state;
       metaParts.push(`<span class="badge">${formattedZone}</span>`);
     }
-    if (this._config.show_badges !== false) {
+    if (isOffline) {
+      metaParts.push(`<span class="badge badge-offline">Offline</span>`);
+    } else if (this._config.show_badges !== false) {
       const batt = formatBatteryText(this._hass, companions);
       if (batt) metaParts.push(`<span class="badge">${batt}</span>`);
       if (dirState && dirState.state && dirState.state !== "unknown" && dirState.state !== "unavailable") {
@@ -1734,11 +1989,14 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     });
     this._pillEl.addEventListener("click", (e) => {
       e.stopPropagation();
-      // Recenter map smoothly on the selected device
+      // Recenter map cleanly with downward marker offset below the floating pill
       if (this._mapEl && this._selectedEntity) {
         this._mapEl.entities = [this._selectedEntity];
-        if (typeof this._mapEl.fitMap === "function") {
-          this._mapEl.fitMap();
+        const st = this._hass?.states?.[this._selectedEntity];
+        const lat = Number(st?.attributes?.latitude);
+        const lon = Number(st?.attributes?.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+          centerMapWithOffset(this._mapEl, lat, lon, Number(this._config.default_zoom) || 15, 36);
         }
       }
     });
@@ -1801,8 +2059,10 @@ class SmartThingsFindCarouselCard extends HTMLElement {
 
   _syncMap() {
     if (!this._mapEl || !this._hass || !this._selectedEntity) return;
+    const dark = isDarkMode(this._hass);
     this._mapEl.hass = this._hass;
-    this._mapEl.darkMode = isDarkMode(this._hass);
+    this._mapEl.darkMode = dark;
+    this._mapEl.themeMode = dark ? "dark" : "light";
     this._mapEl.defaultZoom = Number(this._config.default_zoom) || 15;
     this._mapEl.autoFit = true;
     this._mapEl.fitZones = false;
@@ -1812,46 +2072,62 @@ class SmartThingsFindCarouselCard extends HTMLElement {
       this._mapEl.entities = [this._selectedEntity];
       this._lastMapEntity = this._selectedEntity;
       this._lastMapCoords = key;
+      const st = this._hass?.states?.[this._selectedEntity];
+      const lat = Number(st?.attributes?.latitude);
+      const lon = Number(st?.attributes?.longitude);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        // Shift marker down (+36px) so it sits cleanly below the top floating pill
+        centerMapWithOffset(this._mapEl, lat, lon, Number(this._config.default_zoom) || 15, 36);
+      }
     }
   }
 
   _renderCarousel(entities) {
-    const signature = entities
+    // Only rebuild the DOM when the device list or icon URLs actually change —
+    // never on selection changes, so <img> elements are reused with zero flicker/alt flash.
+    const listSig = entities
       .map((eid) => {
         const st = this._hass?.states?.[eid];
-        return `${eid}|${st?.attributes?.entity_picture || ""}|${eid === this._selectedEntity ? 1 : 0}`;
+        return `${eid}|${st?.attributes?.entity_picture || ""}|${st?.attributes?.friendly_name || ""}`;
       })
       .join(";");
-    if (signature === this._lastCarouselSig) return;
-    this._lastCarouselSig = signature;
 
-    this._carouselBar.innerHTML = "";
-    for (const eid of entities) {
-      const st = this._hass?.states?.[eid];
-      const name = st?.attributes?.friendly_name || eid;
-      const pic = st?.attributes?.entity_picture;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = `device-pill${eid === this._selectedEntity ? " active" : ""}`;
-      btn.title = name;
-      btn.setAttribute("aria-label", name);
-      if (pic) {
-        const img = document.createElement("img");
-        img.src = pic;
-        img.alt = name;
-        img.loading = "lazy";
-        btn.appendChild(img);
-      } else {
-        const span = document.createElement("span");
-        span.className = "fallback-svg";
-        span.innerHTML = ICON_DEVICE_FALLBACK;
-        btn.appendChild(span);
+    if (listSig !== this._lastCarouselListSig) {
+      this._lastCarouselListSig = listSig;
+      this._carouselBar.innerHTML = "";
+      for (const eid of entities) {
+        const st = this._hass?.states?.[eid];
+        const name = st?.attributes?.friendly_name || eid;
+        const pic = st?.attributes?.entity_picture;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "device-pill";
+        btn.dataset.entityId = eid;
+        btn.title = name;
+        btn.setAttribute("aria-label", name);
+        if (pic) {
+          const img = document.createElement("img");
+          img.src = pic;
+          img.alt = "";
+          img.decoding = "async";
+          btn.appendChild(img);
+        } else {
+          const span = document.createElement("span");
+          span.className = "fallback-svg";
+          span.innerHTML = ICON_DEVICE_FALLBACK;
+          btn.appendChild(span);
+        }
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this._selectEntity(eid, btn);
+        });
+        this._carouselBar.appendChild(btn);
       }
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this._selectEntity(eid, btn);
-      });
-      this._carouselBar.appendChild(btn);
+    }
+
+    // Fast O(n) class toggle without touching <img> elements
+    for (const btn of this._carouselBar.querySelectorAll(".device-pill")) {
+      btn.classList.toggle("active", btn.dataset.entityId === this._selectedEntity);
     }
   }
 
@@ -1885,13 +2161,17 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     const companions = findCompanionEntities(this._hass, this._selectedEntity);
     const locState = companions.locationSensor ? this._hass?.states?.[companions.locationSensor] : null;
     const dirState = companions.directionSensor ? this._hass?.states?.[companions.directionSensor] : null;
+    const connState = companions.connectionSensor ? this._hass?.states?.[companions.connectionSensor] : null;
+    const isOffline = Boolean(connState && connState.state === "offline");
 
     this._pillName.textContent = st?.attributes?.friendly_name || this._selectedEntity;
     const ts = formatLastUpdated(this._hass, st, locState);
     this._pillTs.textContent = ts ? `Last updated: ${ts}` : "Last updated: —";
 
     const badges = [];
-    if (this._config.show_badges !== false) {
+    if (isOffline) {
+      badges.push(`<span class="pill-badge badge-offline">Offline</span>`);
+    } else if (this._config.show_badges !== false) {
       const batt = formatBatteryText(this._hass, companions);
       if (batt) badges.push(`<span class="pill-badge">${batt}</span>`);
       if (dirState && dirState.state && dirState.state !== "unknown" && dirState.state !== "unavailable") {
