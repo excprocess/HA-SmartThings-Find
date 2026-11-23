@@ -5,14 +5,13 @@
  *  1. `custom:smartthings-find-device-card`   — Single-device map widget with Refresh, Ring/Stop Ring, and Location History
  *  2. `custom:smartthings-find-carousel-card` — Multi-device map widget with scrollable device bar and Location History popup
  *
- * Integrates with Home Assistant's native `<ha-map>`, Recorder history API (stay/move grouping
- * inspired by konewka17/timeline_card + Samsung Find Location History UI), and Material You Utilities
- * (`--md-sys-color-*`, `--md-sys-shape-*`, `--md-sys-motion-*`).
+ * Uses Home Assistant's native `<ha-map>` public API (`hass`, `entities`, `paths`, `autoFit`,
+ * `fitMap()`, `darkMode`, `themeMode`), Recorder history API (stay/move grouping inspired by
+ * konewka17/timeline_card), and Material You Utilities (`--md-sys-color-*`, `--md-sys-shape-*`).
  */
 
-const CARD_VERSION = "8.5.9";
+const CARD_VERSION = "8.5.10";
 
-// Crisp geometric One UI / MD3 SVG icons
 const ICON_REFRESH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>`;
 const ICON_RING_BELL = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/><path d="M2 8c0-2.2.7-4.3 2-6"/><path d="M22 8a10 10 0 0 0-2-6"/></svg>`;
 const ICON_RING_STOP = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>`;
@@ -49,6 +48,79 @@ function ensureHaMapLoaded() {
     })();
   }
   return _haMapLoaderPromise;
+}
+
+/**
+ * Locate the internal Leaflet map instance on `<ha-map>` dynamically (works regardless of
+ * whether Home Assistant names the field `leafletMap`, `_map`, or minified).
+ */
+function findLeafletMapInstance(mapEl) {
+  if (!mapEl) return null;
+  if (mapEl.leafletMap && typeof mapEl.leafletMap.setView === "function") {
+    return mapEl.leafletMap;
+  }
+  for (const key of Object.keys(mapEl)) {
+    const val = mapEl[key];
+    if (
+      val &&
+      typeof val === "object" &&
+      typeof val.setView === "function" &&
+      typeof val.project === "function" &&
+      typeof val.unproject === "function"
+    ) {
+      return val;
+    }
+  }
+  return null;
+}
+
+/**
+ * Center `<ha-map>` with a vertical pixel offset so the marker clears a floating pill
+ * (positive markerShiftDownPx) or bottom scrim (negative markerShiftDownPx).
+ */
+async function centerMapWithOffset(mapEl, lat, lon, zoom, markerShiftDownPx) {
+  if (!mapEl || !Number.isFinite(lat) || !Number.isFinite(lon) || !markerShiftDownPx) return;
+  let lmap = null;
+  for (let i = 0; i < 20; i++) {
+    lmap = findLeafletMapInstance(mapEl);
+    if (lmap) break;
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  if (!lmap) return;
+  setTimeout(() => {
+    try {
+      lmap.invalidateSize();
+      const targetZoom = Number(zoom) || lmap.getZoom() || 15;
+      const pt = lmap.project([lat, lon], targetZoom);
+      pt.y -= markerShiftDownPx;
+      const offsetCenter = lmap.unproject(pt, targetZoom);
+      lmap.setView(offsetCenter, targetZoom, { animate: false });
+    } catch (_e) {
+      // Ignore transient layout states
+    }
+  }, 160);
+}
+
+/**
+ * Hide Leaflet's +/- zoom controls inside `<ha-map>` shadowRoot when the map is locked.
+ */
+function syncMapLockedVisuals(mapEl, locked) {
+  if (!mapEl) return;
+  const apply = () => {
+    const root = mapEl.shadowRoot;
+    if (!root) return;
+    let styleEl = root.getElementById("stf-lock-style");
+    if (!styleEl) {
+      styleEl = document.createElement("style");
+      styleEl.id = "stf-lock-style";
+      root.appendChild(styleEl);
+    }
+    styleEl.textContent = locked
+      ? `.leaflet-control-zoom { display: none !important; }`
+      : "";
+  };
+  apply();
+  setTimeout(apply, 250);
 }
 
 function getSmartThingsFindTrackers(hass) {
@@ -177,35 +249,6 @@ function isDarkMode(hass) {
   return Boolean(hass?.themes?.darkMode);
 }
 
-/**
- * Center `<ha-map>`'s internal Leaflet map on `[lat, lon]` with a vertical pixel offset
- * so the device marker sits clearly below top floating pills (positive markerShiftDownPx)
- * or above bottom scrims (negative markerShiftDownPx). Idempotent (no cumulative drift).
- */
-async function centerMapWithOffset(mapEl, lat, lon, zoom, markerShiftDownPx) {
-  if (!mapEl || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
-  for (let i = 0; i < 20; i++) {
-    if (mapEl.leafletMap && mapEl.Leaflet) break;
-    await new Promise((r) => setTimeout(r, 80));
-  }
-  const lmap = mapEl.leafletMap;
-  const L = mapEl.Leaflet;
-  if (!lmap || !L) return;
-  setTimeout(() => {
-    try {
-      lmap.invalidateSize();
-      const targetZoom = Number(zoom) || lmap.getZoom() || 15;
-      const pt = lmap.project(L.latLng(lat, lon), targetZoom);
-      // Moving map center UP (smaller Y) shifts the marker DOWN on screen
-      pt.y -= markerShiftDownPx;
-      const offsetCenter = lmap.unproject(pt, targetZoom);
-      lmap.setView(offsetCenter, targetZoom, { animate: false });
-    } catch (_e) {
-      // Ignore transient layout states
-    }
-  }, 140);
-}
-
 function haversineMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -231,7 +274,6 @@ function toLocalDateKey(dateObj) {
   return `${y}-${m}-${d}`;
 }
 
-// Lightweight Nominatim reverse geocode cache (sessionStorage) for timeline addresses
 const _geoCacheMem = new Map();
 async function reverseGeocode(lat, lon) {
   const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
@@ -242,9 +284,7 @@ async function reverseGeocode(lat, lon) {
       _geoCacheMem.set(key, cached);
       return cached;
     }
-  } catch (_e) {
-    // Ignore storage errors
-  }
+  } catch (_e) {}
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&zoom=17&addressdetails=1`;
     const resp = await fetch(url, { headers: { Accept: "application/json" } });
@@ -267,15 +307,16 @@ async function reverseGeocode(lat, lon) {
       try { sessionStorage.setItem(`stf_geo_${key}`, label); } catch (_e) {}
       return label;
     }
-  } catch (_err) {
-    // Offline or blocked
-  }
+  } catch (_err) {}
   return null;
 }
 
 const SHARED_THEME_CSS = `
   :host {
     display: block;
+    position: relative;
+    z-index: 0;
+    isolation: isolate;
     --stf-font: var(--paper-font-body1_-_font-family, "SamsungOne", "Roboto", system-ui, -apple-system, sans-serif);
     --stf-ease-standard: var(--md-sys-motion-easing-emphasized, cubic-bezier(0.2, 0, 0, 1));
   }
@@ -325,7 +366,7 @@ const SHARED_THEME_CSS = `
     --stf-outline-strong: rgba(255, 255, 255, 0.16);
     --stf-rail: #3A3A40;
     --stf-scrim-rgb: 23, 23, 26;
-    --stf-shadow: 0 4px 18px rgba(0, 0, 0, 0.40);
+    --stf-shadow: 0 4px 18px rgba(0, 0, 0, 0.36);
     --stf-item-active-bg: #27272B;
     --stf-bubble-border: 2px solid #5C95FF;
     --stf-bubble-bg: rgba(28, 28, 32, 0.94);
@@ -352,13 +393,13 @@ const SHARED_THEME_CSS = `
     --stf-outline-strong: var(--md-sys-color-outline, rgba(0, 0, 0, 0.24));
     --stf-rail: var(--md-sys-color-outline-variant, rgba(0, 0, 0, 0.16));
     --stf-scrim-rgb: 243, 246, 252;
-    --stf-shadow: var(--ha-card-box-shadow, none);
+    --stf-shadow: none;
     --stf-btn-radius: var(--md-sys-shape-corner-full, 9999px);
     --stf-fab-radius: var(--md-sys-shape-corner-large, 16px);
     --stf-item-radius: 18px;
     --stf-item-active-bg: var(--md-sys-color-secondary-container, #D3E3FD);
     --stf-bubble-radius: 22px;
-    --stf-bubble-border: 1.5px solid var(--md-sys-color-outline-variant, rgba(0, 0, 0, 0.12));
+    --stf-bubble-border: none;
     --stf-bubble-bg: var(--md-sys-color-surface-container-high, #ECEEF4);
     --stf-ring-bg: var(--md-sys-color-primary-container, #D3E3FD);
     --stf-ring-color: var(--md-sys-color-on-primary-container, #041E49);
@@ -370,27 +411,47 @@ const SHARED_THEME_CSS = `
     --stf-scrim-rgb: 20, 22, 27;
   }
 
+  /* Strict stacking-context isolation & zero unwanted white border! */
   ha-card.stf-shell {
     position: relative;
+    z-index: 0;
+    isolation: isolate;
+    contain: layout paint;
     overflow: hidden;
     border-radius: var(--stf-radius);
     background: var(--stf-surface);
     color: var(--stf-on-surface);
-    border: 1px solid var(--stf-outline);
+    border: none !important;
+    --ha-card-border-width: 0px;
+    --ha-card-border-color: transparent;
     box-shadow: var(--stf-shadow);
     font-family: var(--stf-font);
     padding: 0;
-    transition: background-color 220ms var(--stf-ease-standard), border-color 220ms var(--stf-ease-standard);
+    transition: background-color 220ms var(--stf-ease-standard);
   }
 
   .map-wrap {
     position: relative;
+    z-index: 0;
+    isolation: isolate;
     width: 100%;
     overflow: hidden;
     background: var(--stf-surface-muted);
   }
 
-  .map-wrap ha-map {
+  /* Traps Leaflet's internal z-index: 400..1000 inside .map-host so it NEVER leaks out! */
+  .map-host {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    isolation: isolate;
+  }
+
+  .map-host.locked {
+    pointer-events: none;
+  }
+
+  .map-host ha-map {
     display: block;
     width: 100%;
     height: 100%;
@@ -400,7 +461,7 @@ const SHARED_THEME_CSS = `
     position: absolute;
     inset: 0;
     pointer-events: none;
-    z-index: 400;
+    z-index: 2;
   }
 
   .icon-btn {
@@ -412,7 +473,7 @@ const SHARED_THEME_CSS = `
     cursor: pointer;
     padding: 0;
     outline: none;
-    transition: transform 160ms var(--stf-ease-standard), background-color 180ms var(--stf-ease-standard), box-shadow 180ms var(--stf-ease-standard), border-color 180ms var(--stf-ease-standard);
+    transition: transform 160ms var(--stf-ease-standard), background-color 180ms var(--stf-ease-standard), box-shadow 180ms var(--stf-ease-standard);
     -webkit-tap-highlight-color: transparent;
   }
 
@@ -427,8 +488,8 @@ const SHARED_THEME_CSS = `
   }
 
   .design-md3 .icon-btn {
-    border-color: transparent;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
+    border: none;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
   }
 
   .design-md3 .icon-btn:hover {
@@ -471,8 +532,8 @@ const SHARED_THEME_CSS = `
 
 /* ============================================================================================
  * LOCATION HISTORY POPUP MODAL (`smartthings-find-history-dialog`)
- * Faithful to Samsung Find Location History (One UI) + Material Design 3 (Material You)
- * Uses Home Assistant Recorder history API with Stay & Move grouping (konewka17/timeline_card)
+ * Uses 100% native `<ha-map>` public API (`paths` + synthetic stop entities in proxy `hass`)
+ * so trails, stop pins, dark tiles, and pan/focus on timeline click work on EVERY HA version!
  * ============================================================================================ */
 class SmartThingsFindHistoryDialog extends HTMLElement {
   constructor() {
@@ -486,7 +547,6 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     this._selectedIdx = 0;
     this._loading = false;
     this._mapEl = null;
-    this._historyLayer = null;
     this._onKeyDown = (e) => {
       if (e.key === "Escape") this.close();
     };
@@ -499,7 +559,6 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     this._selectedDate = new Date();
     this._stops = [];
     this._selectedIdx = 0;
-    this._historyLayer = null;
     this._renderShell();
     document.body.appendChild(this);
     window.addEventListener("keydown", this._onKeyDown);
@@ -520,15 +579,6 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     return this._design === "md3" ? "#0B57D0" : "#387AFF";
   }
 
-  _getResolvedSurface() {
-    const dialog = this.shadowRoot.querySelector(".dialog");
-    if (dialog) {
-      const val = getComputedStyle(dialog).getPropertyValue("--stf-surface").trim();
-      if (val) return val;
-    }
-    return isDarkMode(this._hass) ? "#1C1C1E" : "#FFFFFF";
-  }
-
   _renderShell() {
     const dark = isDarkMode(this._hass);
     const st = this._hass?.states?.[this._entityId];
@@ -541,15 +591,15 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           position: fixed;
           inset: 0;
           z-index: 9999;
+          isolation: auto;
           display: flex;
           align-items: center;
           justify-content: center;
         }
-        /* Clean darkened scrim without blur */
         .backdrop {
           position: fixed;
           inset: 0;
-          background: rgba(0, 0, 0, 0.52);
+          background: rgba(0, 0, 0, 0.54);
           animation: stf-fade-in 160ms ease;
         }
         @keyframes stf-fade-in {
@@ -557,7 +607,6 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           to { opacity: 1; }
         }
 
-        /* ==================== BASE DIALOG ==================== */
         .dialog {
           position: relative;
           z-index: 2;
@@ -569,7 +618,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           border-radius: 26px;
           background: var(--stf-surface);
           color: var(--stf-on-surface);
-          border: 1px solid var(--stf-outline);
+          border: none;
           box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
           font-family: var(--stf-font);
           animation: stf-pop-in 200ms var(--stf-ease-standard);
@@ -579,11 +628,10 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           to { opacity: 1; transform: translateY(0) scale(1); }
         }
 
-        /* ==================== MD3 DIALOG OVERRIDES (100% Material Design 3) ==================== */
+        /* ==================== MD3 DIALOG (100% Material Design 3) ==================== */
         .dialog.design-md3 {
           border-radius: 28px;
           background: var(--md-sys-color-surface-container-high, var(--stf-surface-elevated));
-          border: none;
           box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28);
         }
         .dialog.design-md3 .dlg-header {
@@ -611,7 +659,6 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           margin: 0 16px 12px;
           border-radius: 20px;
           flex: 0 0 40%;
-          border: 1px solid var(--md-sys-color-outline-variant, transparent);
         }
         .dialog.design-md3 .dlg-sheet {
           margin-top: 0;
@@ -718,6 +765,8 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
 
         .dlg-map-wrap {
           position: relative;
+          z-index: 0;
+          isolation: isolate;
           flex: 0 0 42%;
           min-height: 200px;
           background: var(--stf-surface-muted);
@@ -739,7 +788,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           border-top-right-radius: 24px;
           margin-top: -16px;
           position: relative;
-          z-index: 410;
+          z-index: 3;
           box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
         }
         .day-bar {
@@ -801,7 +850,6 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           cursor: pointer;
         }
 
-        /* ==================== TIMELINE LIST ==================== */
         .timeline-list {
           flex: 1;
           overflow-y: auto;
@@ -1005,129 +1053,135 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
         map.hass = this._hass;
         map.darkMode = darkMode;
         map.themeMode = darkMode ? "dark" : "light";
-        map.autoFit = false;
+        map.autoFit = true;
         map.fitZones = false;
         map.interactiveZones = false;
-        map.entities = [];
+        map.defaultZoom = 15;
+        map.entities = [this._entityId];
         this._mapEl = map;
         this._mapWrap.appendChild(map);
-        this._waitForLeafletAndDraw(true);
+        setTimeout(() => this._syncHistoryMap(true), 220);
       }
     });
 
     this._updateDayHeader();
   }
 
-  async _waitForLeafletAndDraw(fitAll) {
-    if (!this._mapEl) return;
-    // Wait up to 2.5s for <ha-map> to instantiate its internal Leaflet map
-    for (let attempt = 0; attempt < 25; attempt++) {
-      if (this._mapEl.leafletMap && this._mapEl.Leaflet) break;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    const lmap = this._mapEl.leafletMap;
-    if (!lmap) return;
-    setTimeout(() => {
-      try { lmap.invalidateSize(); } catch (_e) {}
-      this._drawHistoryOnLeaflet(fitAll);
-    }, 120);
-  }
-
-  _drawHistoryOnLeaflet(fitAll = false) {
-    const lmap = this._mapEl?.leafletMap;
-    const L = this._mapEl?.Leaflet;
-    if (!lmap || !L) return;
-
+  /**
+   * Render the day's stops & connecting trail using `<ha-map>`'s native public API:
+   *  - `map.paths`: draws the connecting polyline + breadcrumb dots for all stops of the day.
+   *  - Synthetic stop entity (`device_tracker.__stf_hist_active`) in a cloned `hass.states`
+   *    places the device's real pin on the clicked stop and forces `<ha-map>` to pan/focus on it!
+   */
+  _syncHistoryMap(fitAll = false) {
+    if (!this._mapEl || !this._hass) return;
     const darkMode = isDarkMode(this._hass);
     this._mapEl.darkMode = darkMode;
     this._mapEl.themeMode = darkMode ? "dark" : "light";
+    this._mapEl.fitZones = false;
+    this._mapEl.interactiveZones = false;
+    this._mapEl.autoFit = true;
 
-    if (this._historyLayer) {
-      try { lmap.removeLayer(this._historyLayer); } catch (_e) {}
-    }
-    this._historyLayer = L.layerGroup().addTo(lmap);
+    const origState = this._hass.states?.[this._entityId];
+    const accent = this._getResolvedAccent();
+    const devName = origState?.attributes?.friendly_name || this._entityId;
 
     if (!this._stops.length) {
-      // Fall back to current entity coordinates instead of Amsterdam
-      const st = this._hass?.states?.[this._entityId];
-      const lat = Number(st?.attributes?.latitude);
-      const lon = Number(st?.attributes?.longitude);
-      if (Number.isFinite(lat) && Number.isFinite(lon)) {
-        lmap.setView([lat, lon], 15, { animate: false });
-      }
+      this._mapEl.hass = this._hass;
+      this._mapEl.paths = [];
+      this._mapEl.entities = [this._entityId];
+      setTimeout(() => {
+        try { if (typeof this._mapEl.fitMap === "function") this._mapEl.fitMap(); } catch (_e) {}
+      }, 150);
       return;
     }
 
-    const accent = this._getResolvedAccent();
-    const surface = this._getResolvedSurface();
-
-    // Stops are newest-first; reverse for chronological polyline path
-    const chronoCoords = [...this._stops].reverse().map((s) => [s.lat, s.lon]);
-    if (chronoCoords.length >= 2) {
-      L.polyline(chronoCoords, {
-        color: accent,
-        weight: 4,
-        opacity: 0.88,
-        dashArray: this._design === "one_ui" ? "6, 8" : null,
-        lineCap: "round",
-        lineJoin: "round",
-      }).addTo(this._historyLayer);
-    }
-
-    // Draw stop markers (clickable to select in timeline)
-    this._stops.forEach((stop, idx) => {
-      const isActive = idx === this._selectedIdx;
-      if (isActive) {
-        // Active halo + bold pin marker
-        L.circleMarker([stop.lat, stop.lon], {
-          radius: 15,
-          color: accent,
-          weight: 0,
-          fillColor: accent,
-          fillOpacity: 0.24,
-        }).addTo(this._historyLayer);
-        L.circleMarker([stop.lat, stop.lon], {
-          radius: 8,
-          color: surface,
-          weight: 3,
-          fillColor: accent,
-          fillOpacity: 1,
-        })
-          .addTo(this._historyLayer)
-          .on("click", () => {
-            this._selectedIdx = idx;
-            this._renderTimeline();
-            this._drawHistoryOnLeaflet(false);
-          });
-      } else {
-        L.circleMarker([stop.lat, stop.lon], {
-          radius: 6,
-          color: accent,
-          weight: 2.5,
-          fillColor: surface,
-          fillOpacity: 1,
-        })
-          .addTo(this._historyLayer)
-          .on("click", () => {
-            this._selectedIdx = idx;
-            this._renderTimeline();
-            this._drawHistoryOnLeaflet(false);
-          });
-      }
-    });
-
     const activeStop = this._stops[this._selectedIdx] || this._stops[0];
-    if (fitAll) {
-      if (chronoCoords.length >= 2) {
-        lmap.fitBounds(L.latLngBounds(chronoCoords), { padding: [34, 34], maxZoom: 16 });
-      } else if (activeStop) {
-        lmap.setView([activeStop.lat, activeStop.lon], 16, { animate: false });
-      }
-    } else if (activeStop) {
-      lmap.flyTo([activeStop.lat, activeStop.lon], Math.max(lmap.getZoom() || 15, 15), {
-        duration: 0.45,
+    const syntheticStates = { ...this._hass.states };
+    const mapEntities = [];
+
+    // Chronological stops (oldest -> newest) for connecting trail
+    const chronoStops = [...this._stops].reverse();
+
+    // Register synthetic state for the active selected stop (shows the device icon pin!)
+    const activeId = "device_tracker.__stf_hist_active";
+    syntheticStates[activeId] = {
+      entity_id: activeId,
+      state: activeStop.zoneState || "not_home",
+      attributes: {
+        friendly_name: activeStop.address || activeStop.zoneState || formatTimeHM(activeStop.endDt),
+        latitude: activeStop.lat,
+        longitude: activeStop.lon,
+        gps_accuracy: activeStop.acc || 25,
+        entity_picture: origState?.attributes?.entity_picture,
+      },
+      last_changed: activeStop.startDt.toISOString(),
+      last_updated: activeStop.endDt.toISOString(),
+    };
+    mapEntities.push({ entity_id: activeId, focus: true });
+
+    // On initial day load (fitAll), also include hidden-focus stop entities so fitMap frames the entire day's route
+    if (fitAll && this._stops.length > 1) {
+      this._stops.forEach((stop, idx) => {
+        if (idx === this._selectedIdx) return;
+        const sid = `device_tracker.__stf_hist_${idx}`;
+        syntheticStates[sid] = {
+          entity_id: sid,
+          state: stop.zoneState || "not_home",
+          attributes: {
+            friendly_name: formatTimeHM(stop.endDt),
+            latitude: stop.lat,
+            longitude: stop.lon,
+            gps_accuracy: 0,
+          },
+          last_changed: stop.startDt.toISOString(),
+          last_updated: stop.endDt.toISOString(),
+        };
+        mapEntities.push({ entity_id: sid, focus: true, label_mode: "name" });
       });
     }
+
+    // Build native HaMapPath connecting all chronological points of the day!
+    const pathPoints = chronoStops.map((s) => ({
+      point: [s.lat, s.lon],
+      timestamp: s.endDt,
+    }));
+
+    const proxyHass = Object.assign(Object.create(Object.getPrototypeOf(this._hass)), this._hass, {
+      states: syntheticStates,
+    });
+
+    this._mapEl.hass = proxyHass;
+    this._mapEl.paths = pathPoints.length >= 2
+      ? [{
+          id: this._entityId,
+          color: accent,
+          name: devName,
+          fullDatetime: true,
+          gradualOpacity: 0.75,
+          points: pathPoints,
+        }]
+      : [];
+    this._mapEl.entities = mapEntities;
+
+    // Ensure Leaflet recalculates size inside the modal and pans/fits cleanly
+    setTimeout(() => {
+      const lmap = findLeafletMapInstance(this._mapEl);
+      if (lmap) {
+        try {
+          lmap.invalidateSize();
+          if (fitAll && pathPoints.length >= 2) {
+            lmap.fitBounds(pathPoints.map((p) => p.point), { padding: [36, 36], maxZoom: 16 });
+          } else {
+            lmap.flyTo([activeStop.lat, activeStop.lon], Math.max(lmap.getZoom() || 15, 15), { duration: 0.4 });
+          }
+          return;
+        } catch (_e) {}
+      }
+      try {
+        if (typeof this._mapEl.fitMap === "function") this._mapEl.fitMap();
+      } catch (_e) {}
+    }, 180);
   }
 
   _shiftDay(delta) {
@@ -1183,7 +1237,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     }
 
     this._renderTimeline();
-    this._waitForLeafletAndDraw(true);
+    this._syncHistoryMap(true);
     this._hydrateAddresses();
   }
 
@@ -1291,7 +1345,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
         if (e.target.closest("a")) return;
         this._selectedIdx = idx;
         this._renderTimeline();
-        this._drawHistoryOnLeaflet(false);
+        this._syncHistoryMap(false);
       });
       this._listEl.appendChild(row);
     });
@@ -1324,6 +1378,7 @@ class SmartThingsFindDeviceCard extends HTMLElement {
       design: "one_ui",
       height: 200,
       default_zoom: 15,
+      interactive_map: false,
       show_ring: true,
       show_history: true,
       show_badges: true,
@@ -1338,10 +1393,10 @@ class SmartThingsFindDeviceCard extends HTMLElement {
       design: "one_ui",
       height: 200,
       default_zoom: 15,
+      interactive_map: false,
       show_ring: true,
       show_history: true,
       show_badges: true,
-      interactive_map: true,
       ...config,
     };
     this._render();
@@ -1492,6 +1547,7 @@ class SmartThingsFindDeviceCard extends HTMLElement {
       </style>
       <ha-card class="stf-shell">
         <div class="map-wrap">
+          <div class="map-host"></div>
           <div class="hud-layer">
             <div class="bottom-scrim"></div>
             <div class="top-right-stack">
@@ -1511,6 +1567,7 @@ class SmartThingsFindDeviceCard extends HTMLElement {
 
     this._cardEl = this.shadowRoot.querySelector("ha-card");
     this._mapWrap = this.shadowRoot.querySelector(".map-wrap");
+    this._mapHost = this.shadowRoot.querySelector(".map-host");
     this._btnRefresh = this.shadowRoot.querySelector(".btn-refresh");
     this._btnHistory = this.shadowRoot.querySelector(".btn-history");
     this._btnRing = this.shadowRoot.querySelector(".btn-ring");
@@ -1537,10 +1594,10 @@ class SmartThingsFindDeviceCard extends HTMLElement {
     });
 
     ensureHaMapLoaded().then(() => {
-      if (!this._mapEl && this._mapWrap) {
+      if (!this._mapEl && this._mapHost) {
         const map = document.createElement("ha-map");
         this._mapEl = map;
-        this._mapWrap.insertBefore(map, this._mapWrap.firstChild);
+        this._mapHost.appendChild(map);
         this._syncMap();
       }
     });
@@ -1600,6 +1657,7 @@ class SmartThingsFindDeviceCard extends HTMLElement {
     if (!this._mapEl || !this._hass || !this._config.entity) return;
     const entityId = this._config.entity;
     const dark = isDarkMode(this._hass);
+    const locked = this._config.interactive_map === false;
     this._mapEl.hass = this._hass;
     this._mapEl.darkMode = dark;
     this._mapEl.themeMode = dark ? "dark" : "light";
@@ -1607,6 +1665,8 @@ class SmartThingsFindDeviceCard extends HTMLElement {
     this._mapEl.autoFit = true;
     this._mapEl.fitZones = false;
     this._mapEl.interactiveZones = false;
+    syncMapLockedVisuals(this._mapEl, locked);
+
     const key = this._coordsKey(entityId);
     if (this._lastMapEntity !== entityId || this._lastMapCoords !== key) {
       this._mapEl.entities = [entityId];
@@ -1616,7 +1676,6 @@ class SmartThingsFindDeviceCard extends HTMLElement {
       const lat = Number(st?.attributes?.latitude);
       const lon = Number(st?.attributes?.longitude);
       if (Number.isFinite(lat) && Number.isFinite(lon)) {
-        // Shift marker slightly up (-18px) so it clears the bottom info block
         centerMapWithOffset(this._mapEl, lat, lon, Number(this._config.default_zoom) || 15, -18);
       }
     }
@@ -1628,11 +1687,12 @@ class SmartThingsFindDeviceCard extends HTMLElement {
 
     const design = this._config.design === "md3" ? "md3" : "one_ui";
     const dark = isDarkMode(this._hass);
+    const locked = this._config.interactive_map === false;
     this._cardEl.className = `stf-shell design-${design}${dark ? " dark" : ""}`;
 
     const height = Math.max(140, Number(this._config.height) || 200);
     this._mapWrap.style.height = `${height}px`;
-    this._mapWrap.style.pointerEvents = this._config.interactive_map === false ? "none" : "auto";
+    this._mapHost.classList.toggle("locked", locked);
     this._btnHistory.classList.toggle("hidden", this._config.show_history === false);
 
     if (!this._hass || !this._config.entity) return;
@@ -1678,6 +1738,8 @@ class SmartThingsFindDeviceCard extends HTMLElement {
 
 /* ============================================================================================
  * CARD 2: Multi-Device Carousel Map Card (`custom:smartthings-find-carousel-card`)
+ *  - One UI mode: floating top info pill + downward-shifted map pin + circular bottom slider
+ *  - MD3 mode: clean unobstructed map with smooth fade -> structured MD3 info bar above slider
  * ============================================================================================ */
 class SmartThingsFindCarouselCard extends HTMLElement {
   constructor() {
@@ -1698,8 +1760,9 @@ class SmartThingsFindCarouselCard extends HTMLElement {
   static getStubConfig(_hass) {
     return {
       design: "one_ui",
-      map_height: 220,
+      map_height: 210,
       default_zoom: 15,
+      interactive_map: false,
       show_badges: true,
       show_history: true,
     };
@@ -1708,11 +1771,11 @@ class SmartThingsFindCarouselCard extends HTMLElement {
   setConfig(config) {
     this._config = {
       design: "one_ui",
-      map_height: 220,
+      map_height: 210,
       default_zoom: 15,
+      interactive_map: false,
       show_badges: true,
       show_history: true,
-      interactive_map: true,
       entities: [],
       ...config,
     };
@@ -1725,7 +1788,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
   }
 
   getCardSize() {
-    return Math.max(5, Math.round(((this._config.map_height || 220) + 92) / 50));
+    return Math.max(5, Math.round(((this._config.map_height || 210) + 110) / 50));
   }
 
   _getEntities() {
@@ -1770,7 +1833,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
           display: none;
         }
 
-        /* Clean Floating Top Info Pill (no static pointer arrow so panning the map looks natural!) */
+        /* Floating top pill: shown ONLY in One UI mode */
         .pill-anchor {
           position: absolute;
           top: 10px;
@@ -1778,6 +1841,9 @@ class SmartThingsFindCarouselCard extends HTMLElement {
           transform: translateX(-50%);
           max-width: calc(100% - 118px);
           pointer-events: auto;
+        }
+        .design-md3 .pill-anchor {
+          display: none;
         }
         .info-pill {
           background: var(--stf-bubble-bg);
@@ -1788,11 +1854,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
           backdrop-filter: blur(10px);
           text-align: center;
           cursor: pointer;
-          transition: background-color 180ms var(--stf-ease-standard), border-color 180ms var(--stf-ease-standard);
-        }
-        .design-md3 .info-pill {
-          backdrop-filter: none;
-          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14);
+          transition: background-color 180ms var(--stf-ease-standard);
         }
         .pill-name {
           font-size: 14px;
@@ -1828,7 +1890,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
         .pill-badge {
           font-size: 10.5px;
           font-weight: 600;
-          padding: 1px 8px;
+          padding: 2px 8px;
           border-radius: 9999px;
           background: var(--stf-surface-muted);
           color: var(--stf-on-surface);
@@ -1851,7 +1913,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
           border-radius: 9999px;
           transition: color 150ms ease;
         }
-        .design-md3 .inline-refresh, .inline-refresh:hover {
+        .inline-refresh:hover {
           color: var(--stf-accent);
         }
         .inline-refresh svg {
@@ -1859,7 +1921,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
           height: 14px;
         }
 
-        /* Smooth MD3 gradient fade between map and device selector */
+        /* Smooth MD3 gradient fade between map and docked info/slider section */
         .map-bottom-fade {
           position: absolute;
           left: 0;
@@ -1871,13 +1933,67 @@ class SmartThingsFindCarouselCard extends HTMLElement {
           background: linear-gradient(
             to top,
             var(--stf-surface) 0%,
-            color-mix(in srgb, var(--stf-surface) 76%, transparent) 46%,
+            color-mix(in srgb, var(--stf-surface) 78%, transparent) 46%,
             transparent 100%
           );
-          transition: opacity 200ms var(--stf-ease-standard);
         }
         .design-md3 .map-bottom-fade {
           opacity: 1;
+        }
+
+        /* Docked MD3 Info Header Row (above the device slider, no floating bubble!) */
+        .md3-info-bar {
+          display: none;
+        }
+        .design-md3 .md3-info-bar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 4px 16px 6px;
+          background: var(--stf-surface);
+        }
+        .md3-info-main {
+          min-width: 0;
+          flex: 1;
+          cursor: pointer;
+        }
+        .md3-name {
+          font-size: 16px;
+          font-weight: 600;
+          color: var(--stf-on-surface);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          line-height: 1.25;
+        }
+        .md3-sub-row {
+          margin-top: 3px;
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 6px;
+        }
+        .md3-ts {
+          font-size: 12px;
+          color: var(--stf-on-surface-muted);
+          font-variant-numeric: tabular-nums;
+        }
+        .md3-badges {
+          display: inline-flex;
+          flex-wrap: wrap;
+          gap: 5px;
+        }
+        .md3-badges:empty {
+          display: none;
+        }
+        .md3-refresh-btn {
+          flex: 0 0 auto;
+          width: 40px;
+          height: 40px;
+          border-radius: 9999px;
+          background: var(--stf-refresh-bg);
+          color: var(--stf-refresh-color);
         }
 
         /* Scrollable Bottom Device Strip */
@@ -1896,7 +2012,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
         }
         .design-md3 .carousel-bar {
           border-top: none;
-          padding-top: 8px;
+          padding: 8px 16px 14px;
         }
         .carousel-bar::-webkit-scrollbar {
           display: none;
@@ -1946,6 +2062,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
       </style>
       <ha-card class="stf-shell">
         <div class="map-wrap">
+          <div class="map-host"></div>
           <div class="hud-layer">
             <div class="right-actions">
               <button class="icon-btn btn-more" title="Device details" aria-label="Device details">${ICON_CHEVRON_RIGHT}</button>
@@ -1964,12 +2081,23 @@ class SmartThingsFindCarouselCard extends HTMLElement {
             <div class="map-bottom-fade"></div>
           </div>
         </div>
+        <div class="md3-info-bar">
+          <div class="md3-info-main" title="Device details">
+            <div class="md3-name"></div>
+            <div class="md3-sub-row">
+              <span class="md3-ts"></span>
+              <span class="md3-badges"></span>
+            </div>
+          </div>
+          <button class="icon-btn md3-refresh-btn" title="Update location" aria-label="Update location">${ICON_REFRESH}</button>
+        </div>
         <div class="carousel-bar"></div>
       </ha-card>
     `;
 
     this._cardEl = this.shadowRoot.querySelector("ha-card");
     this._mapWrap = this.shadowRoot.querySelector(".map-wrap");
+    this._mapHost = this.shadowRoot.querySelector(".map-host");
     this._btnMore = this.shadowRoot.querySelector(".btn-more");
     this._btnHistory = this.shadowRoot.querySelector(".btn-history");
     this._pillEl = this.shadowRoot.querySelector(".info-pill");
@@ -1977,9 +2105,18 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     this._pillTs = this.shadowRoot.querySelector(".pill-ts");
     this._pillBadges = this.shadowRoot.querySelector(".pill-badges");
     this._btnRefresh = this.shadowRoot.querySelector(".inline-refresh");
+    this._md3InfoMain = this.shadowRoot.querySelector(".md3-info-main");
+    this._md3Name = this.shadowRoot.querySelector(".md3-name");
+    this._md3Ts = this.shadowRoot.querySelector(".md3-ts");
+    this._md3Badges = this.shadowRoot.querySelector(".md3-badges");
+    this._md3Refresh = this.shadowRoot.querySelector(".md3-refresh-btn");
     this._carouselBar = this.shadowRoot.querySelector(".carousel-bar");
 
     this._btnMore.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (this._selectedEntity) fireMoreInfo(this, this._selectedEntity);
+    });
+    this._md3InfoMain.addEventListener("click", (e) => {
       e.stopPropagation();
       if (this._selectedEntity) fireMoreInfo(this, this._selectedEntity);
     });
@@ -1989,7 +2126,6 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     });
     this._pillEl.addEventListener("click", (e) => {
       e.stopPropagation();
-      // Recenter map cleanly with downward marker offset below the floating pill
       if (this._mapEl && this._selectedEntity) {
         this._mapEl.entities = [this._selectedEntity];
         const st = this._hass?.states?.[this._selectedEntity];
@@ -2004,12 +2140,16 @@ class SmartThingsFindCarouselCard extends HTMLElement {
       e.stopPropagation();
       this._handleRefresh();
     });
+    this._md3Refresh.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._handleRefresh();
+    });
 
     ensureHaMapLoaded().then(() => {
-      if (!this._mapEl && this._mapWrap) {
+      if (!this._mapEl && this._mapHost) {
         const map = document.createElement("ha-map");
         this._mapEl = map;
-        this._mapWrap.insertBefore(map, this._mapWrap.firstChild);
+        this._mapHost.appendChild(map);
         this._syncMap();
       }
     });
@@ -2026,6 +2166,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     const companions = findCompanionEntities(this._hass, this._selectedEntity);
     this._refreshing = true;
     this._btnRefresh?.classList.add("spin");
+    this._md3Refresh?.classList.add("spin");
     try {
       if (companions.updateButton) {
         await this._hass.callService("button", "press", { entity_id: companions.updateButton });
@@ -2038,6 +2179,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
       setTimeout(() => {
         this._refreshing = false;
         this._btnRefresh?.classList.remove("spin");
+        this._md3Refresh?.classList.remove("spin");
       }, 900);
     }
   }
@@ -2060,6 +2202,8 @@ class SmartThingsFindCarouselCard extends HTMLElement {
   _syncMap() {
     if (!this._mapEl || !this._hass || !this._selectedEntity) return;
     const dark = isDarkMode(this._hass);
+    const locked = this._config.interactive_map === false;
+    const isMd3 = this._config.design === "md3";
     this._mapEl.hass = this._hass;
     this._mapEl.darkMode = dark;
     this._mapEl.themeMode = dark ? "dark" : "light";
@@ -2067,24 +2211,27 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     this._mapEl.autoFit = true;
     this._mapEl.fitZones = false;
     this._mapEl.interactiveZones = false;
+    syncMapLockedVisuals(this._mapEl, locked);
+
     const key = this._coordsKey(this._selectedEntity);
-    if (this._lastMapEntity !== this._selectedEntity || this._lastMapCoords !== key) {
+    if (this._lastMapEntity !== this._selectedEntity || this._lastMapCoords !== key || this._lastMapDesign !== this._config.design) {
       this._mapEl.entities = [this._selectedEntity];
       this._lastMapEntity = this._selectedEntity;
       this._lastMapCoords = key;
-      const st = this._hass?.states?.[this._selectedEntity];
-      const lat = Number(st?.attributes?.latitude);
-      const lon = Number(st?.attributes?.longitude);
-      if (Number.isFinite(lat) && Number.isFinite(lon)) {
-        // Shift marker down (+36px) so it sits cleanly below the top floating pill
-        centerMapWithOffset(this._mapEl, lat, lon, Number(this._config.default_zoom) || 15, 36);
+      this._lastMapDesign = this._config.design;
+      // In One UI mode shift marker down (+36px) below top floating pill; in MD3 mode center cleanly (0px)
+      if (!isMd3) {
+        const st = this._hass?.states?.[this._selectedEntity];
+        const lat = Number(st?.attributes?.latitude);
+        const lon = Number(st?.attributes?.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+          centerMapWithOffset(this._mapEl, lat, lon, Number(this._config.default_zoom) || 15, 36);
+        }
       }
     }
   }
 
   _renderCarousel(entities) {
-    // Only rebuild the DOM when the device list or icon URLs actually change —
-    // never on selection changes, so <img> elements are reused with zero flicker/alt flash.
     const listSig = entities
       .map((eid) => {
         const st = this._hass?.states?.[eid];
@@ -2125,7 +2272,6 @@ class SmartThingsFindCarouselCard extends HTMLElement {
       }
     }
 
-    // Fast O(n) class toggle without touching <img> elements
     for (const btn of this._carouselBar.querySelectorAll(".device-pill")) {
       btn.classList.toggle("active", btn.dataset.entityId === this._selectedEntity);
     }
@@ -2137,11 +2283,12 @@ class SmartThingsFindCarouselCard extends HTMLElement {
 
     const design = this._config.design === "md3" ? "md3" : "one_ui";
     const dark = isDarkMode(this._hass);
+    const locked = this._config.interactive_map === false;
     this._cardEl.className = `stf-shell design-${design}${dark ? " dark" : ""}`;
 
-    const height = Math.max(150, Number(this._config.map_height) || 220);
+    const height = Math.max(150, Number(this._config.map_height) || 210);
     this._mapWrap.style.height = `${height}px`;
-    this._mapWrap.style.pointerEvents = this._config.interactive_map === false ? "none" : "auto";
+    this._mapHost.classList.toggle("locked", locked);
     this._btnHistory.classList.toggle("hidden", this._config.show_history === false);
 
     const entities = this._getEntities();
@@ -2149,6 +2296,9 @@ class SmartThingsFindCarouselCard extends HTMLElement {
       this._pillName.textContent = "SmartThings Find";
       this._pillTs.textContent = "No tracked devices";
       this._pillBadges.innerHTML = "";
+      this._md3Name.textContent = "SmartThings Find";
+      this._md3Ts.textContent = "No tracked devices";
+      this._md3Badges.innerHTML = "";
       this._carouselBar.innerHTML = `<div class="empty-state" style="height:56px;padding:0">No SmartThings Find devices found</div>`;
       return;
     }
@@ -2164,9 +2314,9 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     const connState = companions.connectionSensor ? this._hass?.states?.[companions.connectionSensor] : null;
     const isOffline = Boolean(connState && connState.state === "offline");
 
-    this._pillName.textContent = st?.attributes?.friendly_name || this._selectedEntity;
+    const devName = st?.attributes?.friendly_name || this._selectedEntity;
     const ts = formatLastUpdated(this._hass, st, locState);
-    this._pillTs.textContent = ts ? `Last updated: ${ts}` : "Last updated: —";
+    const tsLabel = ts ? `Last updated: ${ts}` : "Last updated: —";
 
     const badges = [];
     if (isOffline) {
@@ -2179,7 +2329,17 @@ class SmartThingsFindCarouselCard extends HTMLElement {
         badges.push(`<span class="pill-badge">${dirText}</span>`);
       }
     }
-    this._pillBadges.innerHTML = badges.join("");
+    const badgesHtml = badges.join("");
+
+    // Populate One UI floating pill
+    this._pillName.textContent = devName;
+    this._pillTs.textContent = tsLabel;
+    this._pillBadges.innerHTML = badgesHtml;
+
+    // Populate MD3 docked info bar (above slider)
+    this._md3Name.textContent = devName;
+    this._md3Ts.textContent = tsLabel;
+    this._md3Badges.innerHTML = badgesHtml;
 
     this._renderCarousel(entities);
     this._syncMap();
@@ -2220,6 +2380,7 @@ class SmartThingsFindDeviceCardEditor extends HTMLElement {
       design: this._config.design || "one_ui",
       height: this._config.height ?? 200,
       default_zoom: this._config.default_zoom ?? 15,
+      interactive_map: this._config.interactive_map === true,
       show_ring: this._config.show_ring !== false,
       show_history: this._config.show_history !== false,
       show_badges: this._config.show_badges !== false,
@@ -2241,6 +2402,7 @@ class SmartThingsFindDeviceCardEditor extends HTMLElement {
       },
       { name: "height", label: "Card height (px)", selector: { number: { min: 140, max: 500, step: 10, mode: "box" } } },
       { name: "default_zoom", label: "Default map zoom", selector: { number: { min: 5, max: 19, step: 1, mode: "slider" } } },
+      { name: "interactive_map", label: "Allow map pan & zoom on card", selector: { boolean: {} } },
       { name: "show_ring", label: "Show Ring / Stop Ring button", selector: { boolean: {} } },
       { name: "show_history", label: "Show Location History button", selector: { boolean: {} } },
       { name: "show_badges", label: "Show battery & direction badges", selector: { boolean: {} } },
@@ -2277,8 +2439,9 @@ class SmartThingsFindCarouselCardEditor extends HTMLElement {
     this._form.data = {
       design: this._config.design || "one_ui",
       entities: this._config.entities || [],
-      map_height: this._config.map_height ?? 220,
+      map_height: this._config.map_height ?? 210,
       default_zoom: this._config.default_zoom ?? 15,
+      interactive_map: this._config.interactive_map === true,
       show_history: this._config.show_history !== false,
       show_badges: this._config.show_badges !== false,
     };
@@ -2303,6 +2466,7 @@ class SmartThingsFindCarouselCardEditor extends HTMLElement {
       },
       { name: "map_height", label: "Map height (px)", selector: { number: { min: 150, max: 500, step: 10, mode: "box" } } },
       { name: "default_zoom", label: "Default map zoom", selector: { number: { min: 5, max: 19, step: 1, mode: "slider" } } },
+      { name: "interactive_map", label: "Allow map pan & zoom on card", selector: { boolean: {} } },
       { name: "show_history", label: "Show Location History button", selector: { boolean: {} } },
       { name: "show_badges", label: "Show battery & direction badges", selector: { boolean: {} } },
     ];
