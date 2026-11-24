@@ -5,9 +5,9 @@
  *  1. `custom:smartthings-find-device-card`   — Single-device map widget with Refresh, Ring/Stop Ring, and Location History
  *  2. `custom:smartthings-find-carousel-card` — Multi-device map widget with scrollable device bar and Location History popup
  *
- * Uses Home Assistant's native `<ha-map>` public API (`hass`, `entities`, `paths`, `autoFit`,
- * `fitMap()`, `darkMode`, `themeMode`), Recorder history API (stay/move grouping inspired by
- * konewka17/timeline_card), and Material You Utilities (`--md-sys-color-*`, `--md-sys-shape-*`).
+ * Uses Home Assistant's native `<ha-map>` public API (`entities`, `paths`, `editableLocations`,
+ * `autoFit`, `fitPadding`, `fitMap()`, `fitBounds()`, `zoom`, `themeMode`), Recorder history API
+ * (stay/move grouping inspired by konewka17/timeline_card), and Material You Utilities tokens.
  */
 
 const CARD_VERSION = "8.5.10";
@@ -22,6 +22,12 @@ const ICON_CALENDAR = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor
 const ICON_PIN_FILLED = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>`;
 const ICON_CLOSE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
 const ICON_DEVICE_FALLBACK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.33-6-10a6 6 0 1 1 12 0c0 4.67-6 10-6 10z"/><circle cx="12" cy="11" r="2.2"/></svg>`;
+const ICON_FIT_ROUTE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.95" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`;
+
+const FIT_PADDING_DEVICE = { top: 16, right: 56, bottom: 72, left: 16 };
+const FIT_PADDING_CAROUSEL_ONEUI = { top: 82, right: 44, bottom: 14, left: 14 };
+const FIT_PADDING_CAROUSEL_MD3 = { top: 14, right: 48, bottom: 38, left: 14 };
+const FIT_PADDING_HISTORY = { top: 32, right: 32, bottom: 32, left: 32 };
 
 let _haMapLoaderPromise = null;
 
@@ -50,41 +56,59 @@ function ensureHaMapLoaded() {
   return _haMapLoaderPromise;
 }
 
-/**
- * Locate the internal Leaflet map instance on `<ha-map>` dynamically (works regardless of
- * whether Home Assistant names the field `leafletMap`, `_map`, or minified).
- */
-function findLeafletMapInstance(mapEl) {
-  if (!mapEl) return null;
-  if (mapEl.leafletMap && typeof mapEl.leafletMap.setView === "function") {
-    return mapEl.leafletMap;
-  }
-  for (const key of Object.keys(mapEl)) {
-    const val = mapEl[key];
-    if (
-      val &&
-      typeof val === "object" &&
-      typeof val.setView === "function" &&
-      typeof val.project === "function" &&
-      typeof val.unproject === "function"
-    ) {
-      return val;
+const _HTML_ESC = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  "\"": "&quot;",
+  "'": "&#39;",
+};
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => _HTML_ESC[ch]);
+}
+
+function hasValidCoords(attrs) {
+  if (!attrs) return false;
+  const { latitude, longitude } = attrs;
+  if (latitude === null || latitude === undefined || latitude === "") return false;
+  if (longitude === null || longitude === undefined || longitude === "") return false;
+  return Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude));
+}
+
+function resolveCssColor(containerEl, cssColorExpr, fallbackHex) {
+  if (!containerEl) return fallbackHex;
+  try {
+    const probe = document.createElement("span");
+    probe.style.cssText =
+      "position:absolute;visibility:hidden;pointer-events:none;width:0;height:0;";
+    probe.style.color = cssColorExpr;
+    containerEl.appendChild(probe);
+    const resolved = getComputedStyle(probe).color;
+    probe.remove();
+    if (resolved && !resolved.startsWith("var(") && resolved !== "rgba(0, 0, 0, 0)") {
+      return resolved;
     }
-  }
-  return null;
+  } catch (_e) {}
+  return fallbackHex;
 }
 
 /**
- * Center `<ha-map>` with a vertical pixel offset so the marker clears a floating pill
- * (positive markerShiftDownPx) or bottom scrim (negative markerShiftDownPx).
+ * Legacy HA (< 2026.10) Leaflet vertical marker offset fallback.
+ * On modern HA (2026.10+) `<ha-map>` exposes `fitBounds` and uses `fitPadding` natively.
  */
-async function centerMapWithOffset(mapEl, lat, lon, zoom, markerShiftDownPx) {
+function legacyLeafletOffset(mapEl, lat, lon, zoom, markerShiftDownPx) {
   if (!mapEl || !Number.isFinite(lat) || !Number.isFinite(lon) || !markerShiftDownPx) return;
-  let lmap = null;
-  for (let i = 0; i < 20; i++) {
-    lmap = findLeafletMapInstance(mapEl);
-    if (lmap) break;
-    await new Promise((r) => setTimeout(r, 80));
+  let lmap = mapEl.leafletMap;
+  if (!lmap || typeof lmap.setView !== "function") {
+    lmap = null;
+    for (const key of Object.keys(mapEl)) {
+      const val = mapEl[key];
+      if (val && typeof val === "object" && typeof val.setView === "function" && typeof val.project === "function" && typeof val.unproject === "function") {
+        lmap = val;
+        break;
+      }
+    }
   }
   if (!lmap) return;
   setTimeout(() => {
@@ -95,51 +119,190 @@ async function centerMapWithOffset(mapEl, lat, lon, zoom, markerShiftDownPx) {
       pt.y -= markerShiftDownPx;
       const offsetCenter = lmap.unproject(pt, targetZoom);
       lmap.setView(offsetCenter, targetZoom, { animate: false });
-    } catch (_e) {
-      // Ignore transient layout states
-    }
+    } catch (_e) {}
   }, 160);
 }
 
 /**
- * Hide Leaflet's +/- zoom controls inside `<ha-map>` shadowRoot when the map is locked.
+ * Hide both Leaflet and MapLibre GL zoom controls inside `<ha-map>` shadowRoot when locked.
  */
 function syncMapLockedVisuals(mapEl, locked) {
   if (!mapEl) return;
+  const cssText = locked
+    ? `.leaflet-control-zoom,
+       .maplibregl-ctrl-top-left .maplibregl-ctrl-group,
+       .maplibregl-ctrl-zoom-in,
+       .maplibregl-ctrl-zoom-out { display: none !important; }`
+    : "";
   const apply = () => {
     const root = mapEl.shadowRoot;
-    if (!root) return;
+    if (!root) return false;
+    if (mapEl.__stfLockedApplied === locked && root.getElementById("stf-lock-style")) {
+      return true;
+    }
     let styleEl = root.getElementById("stf-lock-style");
     if (!styleEl) {
       styleEl = document.createElement("style");
       styleEl.id = "stf-lock-style";
       root.appendChild(styleEl);
     }
-    styleEl.textContent = locked
-      ? `.leaflet-control-zoom { display: none !important; }`
-      : "";
+    styleEl.textContent = cssText;
+    mapEl.__stfLockedApplied = locked;
+    return true;
   };
-  apply();
-  setTimeout(apply, 250);
+  if (!apply() && !mapEl.__stfLockPending) {
+    mapEl.__stfLockPending = true;
+    const finish = () => {
+      mapEl.__stfLockPending = false;
+      apply();
+    };
+    if (mapEl.updateComplete && typeof mapEl.updateComplete.then === "function") {
+      mapEl.updateComplete.then(finish);
+    } else {
+      setTimeout(finish, 150);
+    }
+  }
 }
+
+/**
+ * Attach a shared `<ha-map>` instance to a card's host container once connected.
+ */
+function mountCardMap(cardEl, onReady) {
+  if (!cardEl.isConnected || cardEl._mapEl || !cardEl._mapHost) return;
+  const attach = () => {
+    if (!cardEl.isConnected || cardEl._mapEl || !cardEl._mapHost || !customElements.get("ha-map")) return;
+    const map = document.createElement("ha-map");
+    cardEl._mapEl = map;
+    cardEl._mapHost.appendChild(map);
+    onReady(map);
+  };
+  if (customElements.get("ha-map")) {
+    attach();
+    return;
+  }
+  ensureHaMapLoaded().then(attach);
+}
+
+/**
+ * Refit `<ha-map>` natively via `fitMap()` and fall back to Leaflet offset on HA < 2026.10.
+ */
+function recenterCardMap(mapEl, hass, entityId, targetZoom, legacyShiftPx = 0) {
+  if (!mapEl) return;
+  try {
+    if (typeof mapEl.fitMap === "function") {
+      mapEl.fitMap({ unpause_autofit: true, zoom: targetZoom });
+    }
+  } catch (_e) {}
+  if (legacyShiftPx && typeof mapEl.fitBounds !== "function") {
+    const st = hass?.states?.[entityId];
+    if (hasValidCoords(st?.attributes)) {
+      legacyLeafletOffset(
+        mapEl,
+        Number(st.attributes.latitude),
+        Number(st.attributes.longitude),
+        targetZoom,
+        legacyShiftPx
+      );
+    }
+  }
+}
+
+/**
+ * Trigger `Update Location` (or `homeassistant.update_entity`) with spin feedback & timer cleanup.
+ */
+async function triggerRefreshAction(cardEl, entityId, buttons) {
+  if (!cardEl._hass || !entityId || cardEl._refreshing) return;
+  const companions = findCompanionEntities(cardEl._hass, entityId);
+  cardEl._refreshing = true;
+  buttons.forEach((btn) => btn?.classList.add("spin"));
+  try {
+    if (companions.updateButton) {
+      await cardEl._hass.callService("button", "press", { entity_id: companions.updateButton });
+    } else {
+      await cardEl._hass.callService("homeassistant", "update_entity", { entity_id: entityId });
+    }
+  } catch (_err) {
+    // Handled by HA
+  } finally {
+    if (cardEl._refreshTimer) clearTimeout(cardEl._refreshTimer);
+    cardEl._refreshTimer = setTimeout(() => {
+      cardEl._refreshTimer = null;
+      cardEl._refreshing = false;
+      buttons.forEach((btn) => btn?.classList.remove("spin"));
+    }, 900);
+  }
+}
+
+/**
+ * Build status/battery/direction/offline badge markup shared across both cards.
+ */
+function buildDeviceBadgesHtml(hass, st, companions, badgeClass, { includeZone = false, showBadges = true } = {}) {
+  const connState = companions.connectionSensor ? hass.states?.[companions.connectionSensor] : null;
+  const dirState = companions.directionSensor ? hass.states?.[companions.directionSensor] : null;
+  const isOffline = Boolean(connState && connState.state === "offline");
+  const parts = [];
+
+  if (includeZone && st && st.state && st.state !== "unknown" && st.state !== "unavailable") {
+    const formattedZone = hass.formatEntityState ? hass.formatEntityState(st) : st.state;
+    parts.push(`<span class="${badgeClass}">${escapeHtml(formattedZone)}</span>`);
+  }
+  if (isOffline) {
+    parts.push(`<span class="${badgeClass} badge-offline">Offline</span>`);
+  } else if (showBadges) {
+    const batt = formatBatteryText(hass, companions);
+    if (batt) parts.push(`<span class="${badgeClass}">${escapeHtml(batt)}</span>`);
+    if (dirState && dirState.state && dirState.state !== "unknown" && dirState.state !== "unavailable") {
+      const dirText = hass.formatEntityState ? hass.formatEntityState(dirState) : dirState.state;
+      parts.push(`<span class="${badgeClass}">${escapeHtml(dirText)}</span>`);
+    }
+  }
+  return parts.join("");
+}
+
+const _stfRegTrackerCache = new WeakMap();
+const _companionRegCache = new WeakMap();
 
 function getSmartThingsFindTrackers(hass) {
   if (!hass || !hass.states) return [];
-  const regEntities = hass.entities || {};
-  const result = [];
-  for (const entityId of Object.keys(hass.states)) {
-    if (!entityId.startsWith("device_tracker.")) continue;
-    const reg = regEntities[entityId];
-    const st = hass.states[entityId];
-    const isStf =
-      (reg && reg.platform === "smartthings_find") ||
-      (st && st.attributes && (
-        st.attributes.location_type === "FMM" ||
-        st.attributes.location_type === "TRACKER" ||
-        "last_seen_local" in st.attributes
-      ));
-    if (isStf) result.push(entityId);
+  const regEntities = hass.entities || null;
+  let candidateIds = null;
+
+  if (regEntities) {
+    candidateIds = _stfRegTrackerCache.get(regEntities);
+    if (!candidateIds) {
+      const fromReg = [];
+      for (const [eid, reg] of Object.entries(regEntities)) {
+        if (eid.startsWith("device_tracker.") && reg && reg.platform === "smartthings_find") {
+          fromReg.push(eid);
+        }
+      }
+      if (fromReg.length > 0) {
+        candidateIds = fromReg;
+        _stfRegTrackerCache.set(regEntities, candidateIds);
+      }
+    }
   }
+
+  let result;
+  if (candidateIds) {
+    result = candidateIds.filter((eid) => Boolean(hass.states[eid]));
+  } else {
+    result = [];
+    for (const entityId of Object.keys(hass.states)) {
+      if (!entityId.startsWith("device_tracker.")) continue;
+      const reg = regEntities ? regEntities[entityId] : null;
+      const st = hass.states[entityId];
+      const isStf =
+        (reg && reg.platform === "smartthings_find") ||
+        (st && st.attributes && (
+          st.attributes.location_type === "FMM" ||
+          st.attributes.location_type === "TRACKER" ||
+          "last_seen_local" in st.attributes
+        ));
+      if (isStf) result.push(entityId);
+    }
+  }
+
   return result.sort((a, b) => {
     const na = (hass.states[a]?.attributes?.friendly_name || a).toLowerCase();
     const nb = (hass.states[b]?.attributes?.friendly_name || b).toLowerCase();
@@ -161,22 +324,33 @@ function findCompanionEntities(hass, trackerEntityId) {
   };
   if (!hass || !trackerEntityId) return out;
 
-  const regEntities = hass.entities || {};
-  const deviceId = regEntities[trackerEntityId]?.device_id;
+  const regEntities = hass.entities || null;
+  const deviceId = regEntities?.[trackerEntityId]?.device_id;
 
-  if (deviceId) {
-    for (const [eid, entry] of Object.entries(regEntities)) {
-      if (!entry || entry.device_id !== deviceId) continue;
-      if (eid.startsWith("button.") && eid.endsWith("_update_location")) out.updateButton = eid;
-      else if (eid.startsWith("switch.") && eid.endsWith("_ring")) out.ringSwitch = eid;
-      else if (eid.startsWith("sensor.") && eid.endsWith("_left_battery")) out.leftBatterySensor = eid;
-      else if (eid.startsWith("sensor.") && eid.endsWith("_right_battery")) out.rightBatterySensor = eid;
-      else if (eid.startsWith("sensor.") && eid.endsWith("_battery")) out.batterySensor = eid;
-      else if (eid.startsWith("sensor.") && eid.endsWith("_direction")) out.directionSensor = eid;
-      else if (eid.startsWith("sensor.") && eid.endsWith("_connection")) out.connectionSensor = eid;
-      else if (eid.startsWith("sensor.") && eid.endsWith("_location")) out.locationSensor = eid;
-      else if (eid.startsWith("sensor.") && eid.endsWith("_maps_link")) out.mapsLinkSensor = eid;
+  if (regEntities && deviceId) {
+    let byTracker = _companionRegCache.get(regEntities);
+    if (!byTracker) {
+      byTracker = new Map();
+      _companionRegCache.set(regEntities, byTracker);
     }
+    let cached = byTracker.get(trackerEntityId);
+    if (!cached) {
+      cached = { ...out };
+      for (const [eid, entry] of Object.entries(regEntities)) {
+        if (!entry || entry.device_id !== deviceId) continue;
+        if (eid.startsWith("button.") && eid.endsWith("_update_location")) cached.updateButton = eid;
+        else if (eid.startsWith("switch.") && eid.endsWith("_ring")) cached.ringSwitch = eid;
+        else if (eid.startsWith("sensor.") && eid.endsWith("_left_battery")) cached.leftBatterySensor = eid;
+        else if (eid.startsWith("sensor.") && eid.endsWith("_right_battery")) cached.rightBatterySensor = eid;
+        else if (eid.startsWith("sensor.") && eid.endsWith("_battery")) cached.batterySensor = eid;
+        else if (eid.startsWith("sensor.") && eid.endsWith("_direction")) cached.directionSensor = eid;
+        else if (eid.startsWith("sensor.") && eid.endsWith("_connection")) cached.connectionSensor = eid;
+        else if (eid.startsWith("sensor.") && eid.endsWith("_location")) cached.locationSensor = eid;
+        else if (eid.startsWith("sensor.") && eid.endsWith("_maps_link")) cached.mapsLinkSensor = eid;
+      }
+      byTracker.set(trackerEntityId, cached);
+    }
+    Object.assign(out, cached);
   }
 
   const slug = trackerEntityId.replace(/^device_tracker\./, "");
@@ -315,7 +489,6 @@ const SHARED_THEME_CSS = `
   :host {
     display: block;
     position: relative;
-    z-index: 0;
     isolation: isolate;
     --stf-font: var(--paper-font-body1_-_font-family, "SamsungOne", "Roboto", system-ui, -apple-system, sans-serif);
     --stf-ease-standard: var(--md-sys-motion-easing-emphasized, cubic-bezier(0.2, 0, 0, 1));
@@ -392,7 +565,6 @@ const SHARED_THEME_CSS = `
     --stf-outline: var(--md-sys-color-outline-variant, rgba(0, 0, 0, 0.12));
     --stf-outline-strong: var(--md-sys-color-outline, rgba(0, 0, 0, 0.24));
     --stf-rail: var(--md-sys-color-outline-variant, rgba(0, 0, 0, 0.16));
-    --stf-scrim-rgb: 243, 246, 252;
     --stf-shadow: none;
     --stf-btn-radius: var(--md-sys-shape-corner-full, 9999px);
     --stf-fab-radius: var(--md-sys-shape-corner-large, 16px);
@@ -407,14 +579,9 @@ const SHARED_THEME_CSS = `
     --stf-refresh-color: var(--md-sys-color-on-secondary-container, #041E49);
   }
 
-  .stf-shell.design-md3.dark {
-    --stf-scrim-rgb: 20, 22, 27;
-  }
-
-  /* Strict stacking-context isolation & zero unwanted white border! */
+  /* Strict stacking-context isolation & zero unwanted white border */
   ha-card.stf-shell {
     position: relative;
-    z-index: 0;
     isolation: isolate;
     contain: layout paint;
     overflow: hidden;
@@ -439,7 +606,7 @@ const SHARED_THEME_CSS = `
     background: var(--stf-surface-muted);
   }
 
-  /* Traps Leaflet's internal z-index: 400..1000 inside .map-host so it NEVER leaks out! */
+  /* Traps internal Leaflet/MapLibre stacking layers inside .map-host */
   .map-host {
     position: absolute;
     inset: 0;
@@ -532,8 +699,9 @@ const SHARED_THEME_CSS = `
 
 /* ============================================================================================
  * LOCATION HISTORY POPUP MODAL (`smartthings-find-history-dialog`)
- * Uses 100% native `<ha-map>` public API (`paths` + synthetic stop entities in proxy `hass`)
- * so trails, stop pins, dark tiles, and pan/focus on timeline click work on EVERY HA version!
+ * Mounted inside `<home-assistant>`'s shadowRoot so `<ha-map>` receives all HA `@lit/context`
+ * subscriptions (`statesContext`, `configContext`, `i18n`, `formatters`, `connection`).
+ * Uses native `paths` + `editableLocations` + `fitBounds()` on HA 2026.10+ (with legacy fallback).
  * ============================================================================================ */
 class SmartThingsFindHistoryDialog extends HTMLElement {
   constructor() {
@@ -544,8 +712,10 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     this._design = "one_ui";
     this._selectedDate = new Date();
     this._stops = [];
+    this._rawTrailPoints = [];
     this._selectedIdx = 0;
     this._loading = false;
+    this._loadToken = 0;
     this._mapEl = null;
     this._onKeyDown = (e) => {
       if (e.key === "Escape") this.close();
@@ -553,36 +723,42 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
   }
 
   open(hass, entityId, design = "one_ui") {
+    this._loadToken += 1;
     this._hass = hass;
     this._entityId = entityId;
     this._design = design === "md3" ? "md3" : "one_ui";
     this._selectedDate = new Date();
     this._stops = [];
+    this._rawTrailPoints = [];
     this._selectedIdx = 0;
+    this._mapEl = null;
     this._renderShell();
-    document.body.appendChild(this);
+    const haEl = document.querySelector("home-assistant");
+    const mountRoot = (haEl && haEl.shadowRoot) || haEl || document.body;
+    if (this.parentNode !== mountRoot) {
+      mountRoot.appendChild(this);
+    }
     window.addEventListener("keydown", this._onKeyDown);
     this._loadDayHistory();
   }
 
   close() {
+    this._loadToken += 1;
     window.removeEventListener("keydown", this._onKeyDown);
+    this._mapEl = null;
     if (this.parentNode) this.parentNode.removeChild(this);
   }
 
   _getResolvedAccent() {
     const dialog = this.shadowRoot.querySelector(".dialog");
-    if (dialog) {
-      const val = getComputedStyle(dialog).getPropertyValue("--stf-accent").trim();
-      if (val) return val;
-    }
-    return this._design === "md3" ? "#0B57D0" : "#387AFF";
+    const fallback = this._design === "md3" ? "#0B57D0" : "#387AFF";
+    return resolveCssColor(dialog, "var(--stf-accent)", fallback);
   }
 
   _renderShell() {
     const dark = isDarkMode(this._hass);
     const st = this._hass?.states?.[this._entityId];
-    const devName = st?.attributes?.friendly_name || this._entityId || "Device";
+    const devName = escapeHtml(st?.attributes?.friendly_name || this._entityId || "Device");
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -776,6 +952,29 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           display: block;
           width: 100%;
           height: 100%;
+        }
+        .btn-fit-route {
+          position: absolute;
+          top: 10px;
+          right: 10px;
+          z-index: 3;
+          width: 34px;
+          height: 34px;
+          border-radius: var(--stf-btn-radius);
+          background: var(--stf-refresh-bg);
+          color: var(--stf-refresh-color);
+          backdrop-filter: blur(8px);
+        }
+        .design-md3 .btn-fit-route {
+          backdrop-filter: none;
+          border-radius: var(--md-sys-shape-corner-medium, 12px);
+        }
+        .btn-fit-route.hidden {
+          display: none;
+        }
+        .btn-fit-route svg {
+          width: 17px;
+          height: 17px;
         }
 
         .dlg-sheet {
@@ -1009,7 +1208,9 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           </div>
           <button class="dlg-close" aria-label="Close">${ICON_CLOSE}</button>
         </div>
-        <div class="dlg-map-wrap"></div>
+        <div class="dlg-map-wrap">
+          <button class="icon-btn btn-fit-route hidden" title="Show full route" aria-label="Show full route">${ICON_FIT_ROUTE}</button>
+        </div>
         <div class="dlg-sheet">
           <div class="day-bar">
             <button class="day-nav-btn btn-prev" aria-label="Previous day">${ICON_CHEVRON_LEFT}</button>
@@ -1035,7 +1236,12 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     this._dayInput = this.shadowRoot.querySelector(".day-input");
     this._listEl = this.shadowRoot.querySelector(".timeline-list");
     this._mapWrap = this.shadowRoot.querySelector(".dlg-map-wrap");
+    this._btnFitRoute = this.shadowRoot.querySelector(".btn-fit-route");
 
+    this._btnFitRoute.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._syncHistoryMap(true);
+    });
     this._btnPrev.addEventListener("click", () => this._shiftDay(-1));
     this._btnNext.addEventListener("click", () => this._shiftDay(1));
     this._dayInput.addEventListener("change", (e) => {
@@ -1047,63 +1253,173 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     });
 
     ensureHaMapLoaded().then(() => {
-      if (!this._mapEl && this._mapWrap) {
-        const darkMode = isDarkMode(this._hass);
-        const map = document.createElement("ha-map");
-        map.hass = this._hass;
-        map.darkMode = darkMode;
-        map.themeMode = darkMode ? "dark" : "light";
-        map.autoFit = true;
-        map.fitZones = false;
-        map.interactiveZones = false;
-        map.defaultZoom = 15;
-        map.entities = [this._entityId];
-        this._mapEl = map;
-        this._mapWrap.appendChild(map);
-        setTimeout(() => this._syncHistoryMap(true), 220);
+      if (!this.isConnected || this._mapEl || !this._mapWrap) return;
+      const darkMode = isDarkMode(this._hass);
+      const map = document.createElement("ha-map");
+      map.hass = this._hass;
+      map.darkMode = darkMode;
+      map.themeMode = darkMode ? "dark" : "light";
+      map.zoom = 15;
+      map.autoFit = true;
+      map.fitZones = false;
+      map.interactiveZones = false;
+      map.clusterMarkers = false;
+      map.fitPadding = FIT_PADDING_HISTORY;
+      map.entities = [this._entityId];
+      map.addEventListener("editable-location-clicked", (ev) => {
+        const id = ev?.detail?.id;
+        if (typeof id === "string" && id.startsWith("stop-")) {
+          const idx = Number(id.slice(5));
+          if (Number.isInteger(idx)) this._selectStop(idx, true);
+        }
+      });
+      this._mapEl = map;
+      this._mapWrap.insertBefore(map, this._btnFitRoute);
+      if (!this._loading) {
+        this._syncHistoryMap(true);
       }
     });
 
     this._updateDayHeader();
   }
 
+  _createStopMarkerEl(isActive, accent, isDark) {
+    const el = document.createElement("div");
+    if (isActive) {
+      el.style.cssText =
+        "position:relative;width:34px;height:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;";
+      const halo = document.createElement("span");
+      halo.style.cssText = `position:absolute;inset:0;border-radius:9999px;background:${accent};opacity:0.26;pointer-events:none;`;
+      const dot = document.createElement("span");
+      dot.style.cssText = `position:relative;width:18px;height:18px;border-radius:9999px;background:${accent};border:3px solid #ffffff;box-shadow:0 2px 8px rgba(0,0,0,0.38);box-sizing:border-box;`;
+      el.appendChild(halo);
+      el.appendChild(dot);
+    } else {
+      const fill = isDark ? "#1E1F24" : "#FFFFFF";
+      el.style.cssText = `width:16px;height:16px;border-radius:9999px;background:${fill};border:3px solid ${accent};box-shadow:0 1px 5px rgba(0,0,0,0.32);box-sizing:border-box;cursor:pointer;`;
+    }
+    return el;
+  }
+
+  _makeEditableStop(stop, idx, isActive, accent, isDark) {
+    const placeLabel =
+      stop.address || stop.zoneState || `${stop.lat.toFixed(4)}, ${stop.lon.toFixed(4)}`;
+    return {
+      id: `stop-${idx}`,
+      location: [stop.lat, stop.lon],
+      element: this._createStopMarkerEl(isActive, accent, isDark),
+      elementSize: isActive ? [34, 34] : [16, 16],
+      title: `${formatTimeHM(stop.endDt)} — ${placeLabel}`,
+      locationEditable: false,
+      activatable: true,
+      fit: true,
+    };
+  }
+
   /**
-   * Render the day's stops & connecting trail using `<ha-map>`'s native public API:
-   *  - `map.paths`: draws the connecting polyline + breadcrumb dots for all stops of the day.
-   *  - Synthetic stop entity (`device_tracker.__stf_hist_active`) in a cloned `hass.states`
-   *    places the device's real pin on the clicked stop and forces `<ha-map>` to pan/focus on it!
+   * Render the day's stops & connecting trail using `<ha-map>`'s native API:
+   *  - HA 2026.10+: `paths` (trail + breadcrumb dots) + `editableLocations` (clickable stop markers)
+   *    + `fitBounds()` (auto-queued via `_pendingFit` if the map engine is still warming up).
+   *  - Legacy HA (< 2026.10): falls back to synthetic stop entities in proxy `hass`.
    */
   _syncHistoryMap(fitAll = false) {
     if (!this._mapEl || !this._hass) return;
+    const map = this._mapEl;
     const darkMode = isDarkMode(this._hass);
-    this._mapEl.darkMode = darkMode;
-    this._mapEl.themeMode = darkMode ? "dark" : "light";
-    this._mapEl.fitZones = false;
-    this._mapEl.interactiveZones = false;
-    this._mapEl.autoFit = true;
+    map.hass = this._hass;
+    map.darkMode = darkMode;
+    map.themeMode = darkMode ? "dark" : "light";
+    map.fitZones = false;
+    map.interactiveZones = false;
+    map.clusterMarkers = false;
 
     const origState = this._hass.states?.[this._entityId];
     const accent = this._getResolvedAccent();
     const devName = origState?.attributes?.friendly_name || this._entityId;
 
+    this._btnFitRoute?.classList.toggle("hidden", this._stops.length < 2);
+
     if (!this._stops.length) {
-      this._mapEl.hass = this._hass;
-      this._mapEl.paths = [];
-      this._mapEl.entities = [this._entityId];
-      setTimeout(() => {
-        try { if (typeof this._mapEl.fitMap === "function") this._mapEl.fitMap(); } catch (_e) {}
-      }, 150);
+      map.paths = [];
+      if ("editableLocations" in map || typeof map.fitBounds === "function") {
+        map.editableLocations = [];
+      }
+      map.entities = [this._entityId];
+      map.autoFit = true;
+      map.zoom = 15;
+      try {
+        if (typeof map.fitMap === "function") {
+          map.fitMap({ unpause_autofit: true, zoom: 15 });
+        }
+      } catch (_e) {}
       return;
     }
 
     const activeStop = this._stops[this._selectedIdx] || this._stops[0];
+    const trail =
+      this._rawTrailPoints.length >= 2
+        ? this._rawTrailPoints
+        : [...this._stops].reverse();
+    const pathPoints = trail.map((s) => ({
+      point: [s.lat, s.lon],
+      timestamp: s.dt || s.endDt,
+    }));
+
+    const buildPaths = () => {
+      if (pathPoints.length < 2) return [];
+      const pathObj = {
+        color: accent,
+        name: devName,
+        fullDatetime: true,
+        points: pathPoints,
+      };
+      // Avoid HA ha-map.ts:1251 divide-by-zero (points.length - 2 === 0 -> NaN opacity)
+      if (pathPoints.length >= 3) {
+        pathObj.gradualOpacity = 0.6;
+      }
+      return [pathObj];
+    };
+
+    // Case 1: Modern HA (2026.10+) supporting fitBounds + editableLocations + Lit Context
+    if (typeof map.fitBounds === "function" && typeof map.setView === "function") {
+      map.entities = [];
+      map.paths = buildPaths();
+
+      const locations = [];
+      this._stops.forEach((stop, idx) => {
+        if (idx === this._selectedIdx) return;
+        locations.push(this._makeEditableStop(stop, idx, false, accent, darkMode));
+      });
+      if (activeStop) {
+        locations.push(this._makeEditableStop(activeStop, this._selectedIdx, true, accent, darkMode));
+      }
+      map.editableLocations = locations;
+
+      if (fitAll) {
+        const allPts =
+          pathPoints.length >= 2
+            ? pathPoints.map((p) => p.point)
+            : this._stops.map((s) => [s.lat, s.lon]);
+        map.fitBounds(allPts, {
+          zoom: allPts.length > 1 ? 16 : 15,
+          pad: 0.25,
+          padding: FIT_PADDING_HISTORY,
+          fly: false,
+        });
+      } else if (activeStop) {
+        map.fitBounds([[activeStop.lat, activeStop.lon]], {
+          zoom: 16,
+          pad: 0.25,
+          padding: FIT_PADDING_HISTORY,
+          fly: true,
+        });
+      }
+      return;
+    }
+
+    // Case 2: Legacy HA (< 2026.10) fallback
     const syntheticStates = { ...this._hass.states };
     const mapEntities = [];
-
-    // Chronological stops (oldest -> newest) for connecting trail
-    const chronoStops = [...this._stops].reverse();
-
-    // Register synthetic state for the active selected stop (shows the device icon pin!)
     const activeId = "device_tracker.__stf_hist_active";
     syntheticStates[activeId] = {
       entity_id: activeId,
@@ -1118,9 +1434,8 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
       last_changed: activeStop.startDt.toISOString(),
       last_updated: activeStop.endDt.toISOString(),
     };
-    mapEntities.push({ entity_id: activeId, focus: true });
+    mapEntities.push({ entity_id: activeId, color: accent, focus: true });
 
-    // On initial day load (fitAll), also include hidden-focus stop entities so fitMap frames the entire day's route
     if (fitAll && this._stops.length > 1) {
       this._stops.forEach((stop, idx) => {
         if (idx === this._selectedIdx) return;
@@ -1137,49 +1452,20 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
           last_changed: stop.startDt.toISOString(),
           last_updated: stop.endDt.toISOString(),
         };
-        mapEntities.push({ entity_id: sid, focus: true, label_mode: "name" });
+        mapEntities.push({ entity_id: sid, color: accent, focus: true, label_mode: "name" });
       });
     }
-
-    // Build native HaMapPath connecting all chronological points of the day!
-    const pathPoints = chronoStops.map((s) => ({
-      point: [s.lat, s.lon],
-      timestamp: s.endDt,
-    }));
 
     const proxyHass = Object.assign(Object.create(Object.getPrototypeOf(this._hass)), this._hass, {
       states: syntheticStates,
     });
-
-    this._mapEl.hass = proxyHass;
-    this._mapEl.paths = pathPoints.length >= 2
-      ? [{
-          id: this._entityId,
-          color: accent,
-          name: devName,
-          fullDatetime: true,
-          gradualOpacity: 0.75,
-          points: pathPoints,
-        }]
-      : [];
-    this._mapEl.entities = mapEntities;
-
-    // Ensure Leaflet recalculates size inside the modal and pans/fits cleanly
+    map.hass = proxyHass;
+    map.autoFit = true;
+    map.paths = buildPaths();
+    map.entities = mapEntities;
     setTimeout(() => {
-      const lmap = findLeafletMapInstance(this._mapEl);
-      if (lmap) {
-        try {
-          lmap.invalidateSize();
-          if (fitAll && pathPoints.length >= 2) {
-            lmap.fitBounds(pathPoints.map((p) => p.point), { padding: [36, 36], maxZoom: 16 });
-          } else {
-            lmap.flyTo([activeStop.lat, activeStop.lon], Math.max(lmap.getZoom() || 15, 15), { duration: 0.4 });
-          }
-          return;
-        } catch (_e) {}
-      }
       try {
-        if (typeof this._mapEl.fitMap === "function") this._mapEl.fitMap();
+        if (typeof map.fitMap === "function") map.fitMap({ unpause_autofit: true, zoom: 15 });
       } catch (_e) {}
     }, 180);
   }
@@ -1214,9 +1500,11 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
   }
 
   async _loadDayHistory() {
+    const token = ++this._loadToken;
     this._updateDayHeader();
     this._loading = true;
     this._stops = [];
+    this._rawTrailPoints = [];
     this._selectedIdx = 0;
     this._listEl.innerHTML = `<div class="tl-empty">Loading history...</div>`;
 
@@ -1225,29 +1513,35 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     const end = new Date(this._selectedDate);
     end.setHours(23, 59, 59, 999);
 
+    let stops = [];
+    let trailPoints = [];
     try {
       const path = `history/period/${encodeURIComponent(start.toISOString())}?filter_entity_id=${encodeURIComponent(this._entityId)}&end_time=${encodeURIComponent(end.toISOString())}`;
       const data = await this._hass.callApi("GET", path);
       const rawStates = Array.isArray(data) && Array.isArray(data[0]) ? data[0] : [];
-      this._stops = this._groupIntoStops(rawStates);
+      ({ stops, trailPoints } = this._groupIntoStops(rawStates));
     } catch (_err) {
-      this._stops = [];
-    } finally {
-      this._loading = false;
+      stops = [];
+      trailPoints = [];
     }
+
+    if (token !== this._loadToken || !this.isConnected) return;
+    this._loading = false;
+    this._stops = stops;
+    this._rawTrailPoints = trailPoints;
 
     this._renderTimeline();
     this._syncHistoryMap(true);
-    this._hydrateAddresses();
+    this._hydrateAddresses(token);
   }
 
   _groupIntoStops(rawStates) {
     const points = [];
     for (const s of rawStates) {
       const attrs = s.attributes || {};
+      if (!hasValidCoords(attrs)) continue;
       const lat = Number(attrs.latitude);
       const lon = Number(attrs.longitude);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
       const rawTime = attrs.last_seen_local || s.last_updated || s.last_changed;
       const dt = new Date(rawTime);
       if (Number.isNaN(dt.getTime())) continue;
@@ -1255,6 +1549,24 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
         ? s.state
         : null;
       points.push({ lat, lon, dt, zoneState, acc: Number(attrs.gps_accuracy) || 0 });
+    }
+    points.sort((a, b) => a.dt - b.dt);
+
+    const trailPoints = [];
+    for (let i = 0; i < points.length; i++) {
+      const pt = points[i];
+      if (!trailPoints.length) {
+        trailPoints.push({ lat: pt.lat, lon: pt.lon, dt: pt.dt });
+        continue;
+      }
+      const prevTrail = trailPoints[trailPoints.length - 1];
+      const dist = haversineMeters(prevTrail.lat, prevTrail.lon, pt.lat, pt.lon);
+      if (dist >= 15) {
+        trailPoints.push({ lat: pt.lat, lon: pt.lon, dt: pt.dt });
+      } else if (i === points.length - 1) {
+        if (dist >= 2) trailPoints.push({ lat: pt.lat, lon: pt.lon, dt: pt.dt });
+        else prevTrail.dt = pt.dt;
+      }
     }
 
     const stays = [];
@@ -1278,21 +1590,51 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
         });
       }
     }
-    return stays.reverse();
+    return { stops: stays.reverse(), trailPoints };
   }
 
-  async _hydrateAddresses() {
+  async _hydrateAddresses(token) {
     let fetched = 0;
     for (let i = 0; i < this._stops.length && fetched < 8; i++) {
+      if (token !== this._loadToken || !this.isConnected) return;
       const stop = this._stops[i];
       if (stop.zoneState || stop.address) continue;
       const addr = await reverseGeocode(stop.lat, stop.lon);
+      if (token !== this._loadToken || !this.isConnected) return;
       if (addr) {
         stop.address = addr;
         const addrEl = this._listEl.querySelector(`[data-stop-idx="${i}"] .tl-addr`);
         if (addrEl) addrEl.textContent = addr;
       }
       fetched += 1;
+    }
+  }
+
+  _selectStop(idx, scrollIntoView = false) {
+    if (idx < 0 || idx >= this._stops.length) return;
+    this._selectedIdx = idx;
+    this._updateTimelineSelection(scrollIntoView);
+    this._syncHistoryMap(false);
+  }
+
+  _updateTimelineSelection(scrollIntoView = false) {
+    if (!this._listEl) return;
+    const isMd3 = this._design === "md3";
+    let activeRow = null;
+    for (const row of this._listEl.querySelectorAll(".tl-row")) {
+      const idx = Number(row.dataset.stopIdx);
+      const isActive = idx === this._selectedIdx;
+      row.classList.toggle("active", isActive);
+      const railCol = row.querySelector(".tl-rail-col");
+      if (railCol) {
+        railCol.innerHTML = isActive
+          ? (isMd3 ? `<span class="tl-md3-node"></span>` : `<span class="tl-pin">${ICON_PIN_FILLED}</span>`)
+          : `<span class="tl-dot"></span>`;
+      }
+      if (isActive) activeRow = row;
+    }
+    if (scrollIntoView && activeRow && typeof activeRow.scrollIntoView === "function") {
+      activeRow.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
   }
 
@@ -1311,14 +1653,15 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
         startHM !== endHM
           ? `<span>${endHM}</span><span>-</span><span>${startHM}</span>`
           : `<span>${endHM}</span>`;
-      const label =
+      const label = escapeHtml(
         stop.address ||
-        (stop.zoneState ? stop.zoneState : `${stop.lat.toFixed(5)}, ${stop.lon.toFixed(5)}`);
+        (stop.zoneState ? stop.zoneState : `${stop.lat.toFixed(5)}, ${stop.lon.toFixed(5)}`)
+      );
       const durationMin = Math.max(0, Math.round((stop.endDt - stop.startDt) / 60000));
       const durText = durationMin >= 60
         ? `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`
         : durationMin > 0 ? `${durationMin} min` : "Point";
-      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${stop.lat},${stop.lon}`;
+      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${stop.lat},${stop.lon}`)}`;
 
       const nodeHtml = isActive
         ? (isMd3 ? `<span class="tl-md3-node"></span>` : `<span class="tl-pin">${ICON_PIN_FILLED}</span>`)
@@ -1343,9 +1686,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
       `;
       row.addEventListener("click", (e) => {
         if (e.target.closest("a")) return;
-        this._selectedIdx = idx;
-        this._renderTimeline();
-        this._syncHistoryMap(false);
+        this._selectStop(idx, false);
       });
       this._listEl.appendChild(row);
     });
@@ -1363,8 +1704,13 @@ class SmartThingsFindDeviceCard extends HTMLElement {
     this._hass = null;
     this._mapEl = null;
     this._refreshing = false;
+    this._refreshTimer = null;
     this._ringPending = false;
     this._built = false;
+    this._lastRenderSig = null;
+    this._lastMetaHtml = null;
+    this._lastRinging = null;
+    this._showRingCached = false;
   }
 
   static getConfigElement() {
@@ -1385,6 +1731,17 @@ class SmartThingsFindDeviceCard extends HTMLElement {
     };
   }
 
+  connectedCallback() {
+    if (this._built) this._tryMountMap();
+  }
+
+  disconnectedCallback() {
+    if (this._refreshTimer) {
+      clearTimeout(this._refreshTimer);
+      this._refreshTimer = null;
+    }
+  }
+
   setConfig(config) {
     if (!config || !config.entity) {
       throw new Error("Please specify a device_tracker `entity`.");
@@ -1399,12 +1756,57 @@ class SmartThingsFindDeviceCard extends HTMLElement {
       show_badges: true,
       ...config,
     };
+    this._lastRenderSig = null;
     this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
+    if (this._built) {
+      const sig = this._computeRenderSig();
+      if (sig === this._lastRenderSig) return;
+    }
     this._render();
+  }
+
+  _computeRenderSig() {
+    const eid = this._config.entity;
+    const states = this._hass?.states;
+    const st = states?.[eid];
+    const companions = findCompanionEntities(this._hass, eid);
+    const locSt = companions.locationSensor ? states?.[companions.locationSensor] : null;
+    const dirSt = companions.directionSensor ? states?.[companions.directionSensor] : null;
+    const connSt = companions.connectionSensor ? states?.[companions.connectionSensor] : null;
+    const ringSt = companions.ringSwitch ? states?.[companions.ringSwitch] : null;
+    const battSt = companions.batterySensor ? states?.[companions.batterySensor] : null;
+    const lbSt = companions.leftBatterySensor ? states?.[companions.leftBatterySensor] : null;
+    const rbSt = companions.rightBatterySensor ? states?.[companions.rightBatterySensor] : null;
+    return [
+      this._config.design,
+      this._config.height,
+      this._config.default_zoom,
+      this._config.interactive_map,
+      this._config.show_ring,
+      this._config.show_history,
+      this._config.show_badges,
+      eid,
+      isDarkMode(this._hass),
+      this._hass?.locale?.language,
+      st?.state,
+      st?.last_updated,
+      st?.attributes?.friendly_name,
+      st?.attributes?.latitude,
+      st?.attributes?.longitude,
+      st?.attributes?.last_seen_local,
+      locSt?.attributes?.last_seen_local,
+      locSt?.attributes?.last_seen,
+      dirSt?.state,
+      connSt?.state,
+      ringSt?.state,
+      battSt?.state,
+      lbSt?.state,
+      rbSt?.state,
+    ].join("|");
   }
 
   getCardSize() {
@@ -1430,6 +1832,14 @@ class SmartThingsFindDeviceCard extends HTMLElement {
             rgba(var(--stf-scrim-rgb), 0.0) 100%
           );
           pointer-events: none;
+        }
+        .design-md3 .bottom-scrim {
+          background: linear-gradient(
+            to top,
+            color-mix(in srgb, var(--stf-surface) 92%, transparent) 0%,
+            color-mix(in srgb, var(--stf-surface) 62%, transparent) 48%,
+            transparent 100%
+          );
         }
         .top-right-stack {
           position: absolute;
@@ -1593,14 +2003,11 @@ class SmartThingsFindDeviceCard extends HTMLElement {
       fireMoreInfo(this, this._config.entity);
     });
 
-    ensureHaMapLoaded().then(() => {
-      if (!this._mapEl && this._mapHost) {
-        const map = document.createElement("ha-map");
-        this._mapEl = map;
-        this._mapHost.appendChild(map);
-        this._syncMap();
-      }
-    });
+    this._tryMountMap();
+  }
+
+  _tryMountMap() {
+    mountCardMap(this, () => this._syncMap(this._showRingCached));
   }
 
   _openHistory() {
@@ -1609,25 +2016,8 @@ class SmartThingsFindDeviceCard extends HTMLElement {
     dlg.open(this._hass, this._config.entity, this._config.design || "one_ui");
   }
 
-  async _handleRefresh() {
-    if (!this._hass || !this._config.entity || this._refreshing) return;
-    const companions = findCompanionEntities(this._hass, this._config.entity);
-    this._refreshing = true;
-    this._btnRefresh?.classList.add("spin");
-    try {
-      if (companions.updateButton) {
-        await this._hass.callService("button", "press", { entity_id: companions.updateButton });
-      } else {
-        await this._hass.callService("homeassistant", "update_entity", { entity_id: this._config.entity });
-      }
-    } catch (_err) {
-      // Handled by HA
-    } finally {
-      setTimeout(() => {
-        this._refreshing = false;
-        this._btnRefresh?.classList.remove("spin");
-      }, 900);
-    }
+  _handleRefresh() {
+    return triggerRefreshAction(this, this._config.entity, [this._btnRefresh]);
   }
 
   async _handleRing() {
@@ -1653,31 +2043,30 @@ class SmartThingsFindDeviceCard extends HTMLElement {
     return `${st.attributes?.latitude},${st.attributes?.longitude},${st.state}`;
   }
 
-  _syncMap() {
+  _syncMap(showRing = false) {
     if (!this._mapEl || !this._hass || !this._config.entity) return;
     const entityId = this._config.entity;
     const dark = isDarkMode(this._hass);
     const locked = this._config.interactive_map === false;
+    const targetZoom = Number(this._config.default_zoom) || 15;
     this._mapEl.hass = this._hass;
     this._mapEl.darkMode = dark;
     this._mapEl.themeMode = dark ? "dark" : "light";
-    this._mapEl.defaultZoom = Number(this._config.default_zoom) || 15;
+    this._mapEl.zoom = targetZoom;
     this._mapEl.autoFit = true;
     this._mapEl.fitZones = false;
     this._mapEl.interactiveZones = false;
+    this._mapEl.clusterMarkers = false;
+    this._mapEl.fitPadding = FIT_PADDING_DEVICE;
+    this._mapEl.style.setProperty("--ha-map-right-inset", showRing ? "66px" : "0px");
     syncMapLockedVisuals(this._mapEl, locked);
 
-    const key = this._coordsKey(entityId);
+    const key = `${this._coordsKey(entityId)}|${targetZoom}`;
     if (this._lastMapEntity !== entityId || this._lastMapCoords !== key) {
       this._mapEl.entities = [entityId];
       this._lastMapEntity = entityId;
       this._lastMapCoords = key;
-      const st = this._hass.states[entityId];
-      const lat = Number(st?.attributes?.latitude);
-      const lon = Number(st?.attributes?.longitude);
-      if (Number.isFinite(lat) && Number.isFinite(lon)) {
-        centerMapWithOffset(this._mapEl, lat, lon, Number(this._config.default_zoom) || 15, -18);
-      }
+      recenterCardMap(this._mapEl, this._hass, entityId, targetZoom, -18);
     }
   }
 
@@ -1696,43 +2085,38 @@ class SmartThingsFindDeviceCard extends HTMLElement {
     this._btnHistory.classList.toggle("hidden", this._config.show_history === false);
 
     if (!this._hass || !this._config.entity) return;
+    this._lastRenderSig = this._computeRenderSig();
+
     const st = this._hass.states[this._config.entity];
     const companions = findCompanionEntities(this._hass, this._config.entity);
     const locState = companions.locationSensor ? this._hass.states[companions.locationSensor] : null;
-    const dirState = companions.directionSensor ? this._hass.states[companions.directionSensor] : null;
-    const connState = companions.connectionSensor ? this._hass.states[companions.connectionSensor] : null;
     const ringState = companions.ringSwitch ? this._hass.states[companions.ringSwitch] : null;
-    const isOffline = Boolean(connState && connState.state === "offline");
 
     this._tsEl.textContent = formatLastUpdated(this._hass, st, locState) || "—";
     this._nameEl.textContent = st?.attributes?.friendly_name || this._config.entity;
 
-    const metaParts = [];
-    if (st && st.state && st.state !== "unknown" && st.state !== "unavailable") {
-      const formattedZone = this._hass.formatEntityState ? this._hass.formatEntityState(st) : st.state;
-      metaParts.push(`<span class="badge">${formattedZone}</span>`);
+    const metaHtml = buildDeviceBadgesHtml(this._hass, st, companions, "badge", {
+      includeZone: true,
+      showBadges: this._config.show_badges !== false,
+    });
+    if (metaHtml !== this._lastMetaHtml) {
+      this._metaEl.innerHTML = metaHtml;
+      this._lastMetaHtml = metaHtml;
     }
-    if (isOffline) {
-      metaParts.push(`<span class="badge badge-offline">Offline</span>`);
-    } else if (this._config.show_badges !== false) {
-      const batt = formatBatteryText(this._hass, companions);
-      if (batt) metaParts.push(`<span class="badge">${batt}</span>`);
-      if (dirState && dirState.state && dirState.state !== "unknown" && dirState.state !== "unavailable") {
-        const dirText = this._hass.formatEntityState ? this._hass.formatEntityState(dirState) : dirState.state;
-        metaParts.push(`<span class="badge">${dirText}</span>`);
-      }
-    }
-    this._metaEl.innerHTML = metaParts.join("");
 
     const showRing = this._config.show_ring !== false && Boolean(companions.ringSwitch);
+    this._showRingCached = showRing;
     const isRinging = Boolean(ringState && ringState.state === "on");
     this._btnRing.classList.toggle("hidden", !showRing);
     this._btnRing.classList.toggle("ringing", isRinging);
-    this._btnRing.innerHTML = isRinging ? ICON_RING_STOP : ICON_RING_BELL;
-    this._btnRing.title = isRinging ? "Stop ringing" : "Ring device";
-    this._btnRing.setAttribute("aria-label", isRinging ? "Stop ringing" : "Ring device");
+    if (isRinging !== this._lastRinging) {
+      this._btnRing.innerHTML = isRinging ? ICON_RING_STOP : ICON_RING_BELL;
+      this._btnRing.title = isRinging ? "Stop ringing" : "Ring device";
+      this._btnRing.setAttribute("aria-label", isRinging ? "Stop ringing" : "Ring device");
+      this._lastRinging = isRinging;
+    }
 
-    this._syncMap();
+    this._syncMap(showRing);
   }
 }
 
@@ -1750,7 +2134,11 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     this._mapEl = null;
     this._selectedEntity = null;
     this._refreshing = false;
+    this._refreshTimer = null;
     this._built = false;
+    this._lastRenderSig = null;
+    this._lastBadgesHtml = null;
+    this._lastCarouselListSig = null;
   }
 
   static getConfigElement() {
@@ -1768,6 +2156,17 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     };
   }
 
+  connectedCallback() {
+    if (this._built) this._tryMountMap();
+  }
+
+  disconnectedCallback() {
+    if (this._refreshTimer) {
+      clearTimeout(this._refreshTimer);
+      this._refreshTimer = null;
+    }
+  }
+
   setConfig(config) {
     this._config = {
       design: "one_ui",
@@ -1779,12 +2178,65 @@ class SmartThingsFindCarouselCard extends HTMLElement {
       entities: [],
       ...config,
     };
+    this._lastRenderSig = null;
     this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
+    if (this._built) {
+      const sig = this._computeRenderSig();
+      if (sig === this._lastRenderSig) return;
+    }
     this._render();
+  }
+
+  _computeRenderSig() {
+    const entities = this._getEntities();
+    const sel =
+      this._selectedEntity && entities.includes(this._selectedEntity)
+        ? this._selectedEntity
+        : entities[0] || "";
+    const states = this._hass?.states;
+    const st = sel ? states?.[sel] : null;
+    const companions = sel ? findCompanionEntities(this._hass, sel) : {};
+    const locSt = companions.locationSensor ? states?.[companions.locationSensor] : null;
+    const dirSt = companions.directionSensor ? states?.[companions.directionSensor] : null;
+    const connSt = companions.connectionSensor ? states?.[companions.connectionSensor] : null;
+    const battSt = companions.batterySensor ? states?.[companions.batterySensor] : null;
+    const lbSt = companions.leftBatterySensor ? states?.[companions.leftBatterySensor] : null;
+    const rbSt = companions.rightBatterySensor ? states?.[companions.rightBatterySensor] : null;
+    const listSig = entities
+      .map((eid) => {
+        const s = states?.[eid];
+        return `${eid}:${s?.attributes?.entity_picture || ""}:${s?.attributes?.friendly_name || ""}`;
+      })
+      .join(",");
+
+    return [
+      this._config.design,
+      this._config.map_height,
+      this._config.default_zoom,
+      this._config.interactive_map,
+      this._config.show_history,
+      this._config.show_badges,
+      isDarkMode(this._hass),
+      this._hass?.locale?.language,
+      sel,
+      listSig,
+      st?.state,
+      st?.last_updated,
+      st?.attributes?.latitude,
+      st?.attributes?.longitude,
+      st?.attributes?.last_seen_local,
+      locSt?.attributes?.last_seen_local,
+      locSt?.attributes?.last_seen,
+      dirSt?.state,
+      connSt?.state,
+      battSt?.state,
+      lbSt?.state,
+      rbSt?.state,
+    ].join("|");
   }
 
   getCardSize() {
@@ -2127,13 +2579,9 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     this._pillEl.addEventListener("click", (e) => {
       e.stopPropagation();
       if (this._mapEl && this._selectedEntity) {
+        const targetZoom = Number(this._config.default_zoom) || 15;
         this._mapEl.entities = [this._selectedEntity];
-        const st = this._hass?.states?.[this._selectedEntity];
-        const lat = Number(st?.attributes?.latitude);
-        const lon = Number(st?.attributes?.longitude);
-        if (Number.isFinite(lat) && Number.isFinite(lon)) {
-          centerMapWithOffset(this._mapEl, lat, lon, Number(this._config.default_zoom) || 15, 36);
-        }
+        recenterCardMap(this._mapEl, this._hass, this._selectedEntity, targetZoom, 36);
       }
     });
     this._btnRefresh.addEventListener("click", (e) => {
@@ -2145,14 +2593,11 @@ class SmartThingsFindCarouselCard extends HTMLElement {
       this._handleRefresh();
     });
 
-    ensureHaMapLoaded().then(() => {
-      if (!this._mapEl && this._mapHost) {
-        const map = document.createElement("ha-map");
-        this._mapEl = map;
-        this._mapHost.appendChild(map);
-        this._syncMap();
-      }
-    });
+    this._tryMountMap();
+  }
+
+  _tryMountMap() {
+    mountCardMap(this, () => this._syncMap());
   }
 
   _openHistory() {
@@ -2161,27 +2606,8 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     dlg.open(this._hass, this._selectedEntity, this._config.design || "one_ui");
   }
 
-  async _handleRefresh() {
-    if (!this._hass || !this._selectedEntity || this._refreshing) return;
-    const companions = findCompanionEntities(this._hass, this._selectedEntity);
-    this._refreshing = true;
-    this._btnRefresh?.classList.add("spin");
-    this._md3Refresh?.classList.add("spin");
-    try {
-      if (companions.updateButton) {
-        await this._hass.callService("button", "press", { entity_id: companions.updateButton });
-      } else {
-        await this._hass.callService("homeassistant", "update_entity", { entity_id: this._selectedEntity });
-      }
-    } catch (_err) {
-      // Handled by HA
-    } finally {
-      setTimeout(() => {
-        this._refreshing = false;
-        this._btnRefresh?.classList.remove("spin");
-        this._md3Refresh?.classList.remove("spin");
-      }, 900);
-    }
+  _handleRefresh() {
+    return triggerRefreshAction(this, this._selectedEntity, [this._btnRefresh, this._md3Refresh]);
   }
 
   _selectEntity(entityId, pillBtn) {
@@ -2190,6 +2616,7 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     if (pillBtn && pillBtn.scrollIntoView) {
       pillBtn.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
     }
+    this._lastRenderSig = null;
     this._render();
   }
 
@@ -2204,30 +2631,31 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     const dark = isDarkMode(this._hass);
     const locked = this._config.interactive_map === false;
     const isMd3 = this._config.design === "md3";
+    const targetZoom = Number(this._config.default_zoom) || 15;
+
     this._mapEl.hass = this._hass;
     this._mapEl.darkMode = dark;
     this._mapEl.themeMode = dark ? "dark" : "light";
-    this._mapEl.defaultZoom = Number(this._config.default_zoom) || 15;
+    this._mapEl.zoom = targetZoom;
     this._mapEl.autoFit = true;
     this._mapEl.fitZones = false;
     this._mapEl.interactiveZones = false;
+    this._mapEl.clusterMarkers = false;
+    this._mapEl.style.setProperty("--ha-map-bottom-inset", isMd3 ? "22px" : "0px");
     syncMapLockedVisuals(this._mapEl, locked);
 
-    const key = this._coordsKey(this._selectedEntity);
-    if (this._lastMapEntity !== this._selectedEntity || this._lastMapCoords !== key || this._lastMapDesign !== this._config.design) {
+    const key = `${this._coordsKey(this._selectedEntity)}|${targetZoom}`;
+    if (
+      this._lastMapEntity !== this._selectedEntity ||
+      this._lastMapCoords !== key ||
+      this._lastMapDesign !== this._config.design
+    ) {
+      this._mapEl.fitPadding = isMd3 ? FIT_PADDING_CAROUSEL_MD3 : FIT_PADDING_CAROUSEL_ONEUI;
       this._mapEl.entities = [this._selectedEntity];
       this._lastMapEntity = this._selectedEntity;
       this._lastMapCoords = key;
       this._lastMapDesign = this._config.design;
-      // In One UI mode shift marker down (+36px) below top floating pill; in MD3 mode center cleanly (0px)
-      if (!isMd3) {
-        const st = this._hass?.states?.[this._selectedEntity];
-        const lat = Number(st?.attributes?.latitude);
-        const lon = Number(st?.attributes?.longitude);
-        if (Number.isFinite(lat) && Number.isFinite(lon)) {
-          centerMapWithOffset(this._mapEl, lat, lon, Number(this._config.default_zoom) || 15, 36);
-        }
-      }
+      recenterCardMap(this._mapEl, this._hass, this._selectedEntity, targetZoom, isMd3 ? 0 : 36);
     }
   }
 
@@ -2291,6 +2719,8 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     this._mapHost.classList.toggle("locked", locked);
     this._btnHistory.classList.toggle("hidden", this._config.show_history === false);
 
+    this._lastRenderSig = this._computeRenderSig();
+
     const entities = this._getEntities();
     if (!entities.length) {
       this._pillName.textContent = "SmartThings Find";
@@ -2299,6 +2729,8 @@ class SmartThingsFindCarouselCard extends HTMLElement {
       this._md3Name.textContent = "SmartThings Find";
       this._md3Ts.textContent = "No tracked devices";
       this._md3Badges.innerHTML = "";
+      this._lastBadgesHtml = "";
+      this._lastCarouselListSig = null;
       this._carouselBar.innerHTML = `<div class="empty-state" style="height:56px;padding:0">No SmartThings Find devices found</div>`;
       return;
     }
@@ -2310,36 +2742,30 @@ class SmartThingsFindCarouselCard extends HTMLElement {
     const st = this._hass?.states?.[this._selectedEntity];
     const companions = findCompanionEntities(this._hass, this._selectedEntity);
     const locState = companions.locationSensor ? this._hass?.states?.[companions.locationSensor] : null;
-    const dirState = companions.directionSensor ? this._hass?.states?.[companions.directionSensor] : null;
-    const connState = companions.connectionSensor ? this._hass?.states?.[companions.connectionSensor] : null;
-    const isOffline = Boolean(connState && connState.state === "offline");
 
     const devName = st?.attributes?.friendly_name || this._selectedEntity;
     const ts = formatLastUpdated(this._hass, st, locState);
     const tsLabel = ts ? `Last updated: ${ts}` : "Last updated: —";
 
-    const badges = [];
-    if (isOffline) {
-      badges.push(`<span class="pill-badge badge-offline">Offline</span>`);
-    } else if (this._config.show_badges !== false) {
-      const batt = formatBatteryText(this._hass, companions);
-      if (batt) badges.push(`<span class="pill-badge">${batt}</span>`);
-      if (dirState && dirState.state && dirState.state !== "unknown" && dirState.state !== "unavailable") {
-        const dirText = this._hass.formatEntityState ? this._hass.formatEntityState(dirState) : dirState.state;
-        badges.push(`<span class="pill-badge">${dirText}</span>`);
-      }
-    }
-    const badgesHtml = badges.join("");
+    const badgesHtml = this._hass?.states
+      ? buildDeviceBadgesHtml(this._hass, st, companions, "pill-badge", {
+          includeZone: false,
+          showBadges: this._config.show_badges !== false,
+        })
+      : "";
 
     // Populate One UI floating pill
     this._pillName.textContent = devName;
     this._pillTs.textContent = tsLabel;
-    this._pillBadges.innerHTML = badgesHtml;
-
     // Populate MD3 docked info bar (above slider)
     this._md3Name.textContent = devName;
     this._md3Ts.textContent = tsLabel;
-    this._md3Badges.innerHTML = badgesHtml;
+
+    if (badgesHtml !== this._lastBadgesHtml) {
+      this._pillBadges.innerHTML = badgesHtml;
+      this._md3Badges.innerHTML = badgesHtml;
+      this._lastBadgesHtml = badgesHtml;
+    }
 
     this._renderCarousel(entities);
     this._syncMap();

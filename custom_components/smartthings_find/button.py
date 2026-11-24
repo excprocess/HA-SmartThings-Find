@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import logging
 import time
 from homeassistant.components.button import ButtonEntity
@@ -79,6 +80,8 @@ class UpdateLocationButton(ButtonEntity):
         )
         tag_data['fmm_api_calls_last_update'] = new_api_calls
         tag_data['fmm_api_calls_total'] = self.device['_fmm_api_calls_total']
+        if tag_data.get('location_found') and not tag_data.get('last_location_retrieved_at'):
+            tag_data['last_location_retrieved_at'] = datetime.now(timezone.utc)
         previous_data = (self.coordinator.data or {}).get(device_id, {}) or {}
         previous_loc = previous_data.get('used_loc') or {}
         result_loc = tag_data.get('used_loc') or {}
@@ -116,7 +119,15 @@ class UpdateLocationButton(ButtonEntity):
                     "[%s] Manual refresh failed (%s/%s) - keeping last known position",
                     dev_name, failures, MAX_STALE_FALLBACK_CYCLES,
                 )
-                tag_data = prev_tag_data
+                failed_tag_data = tag_data
+                tag_data = dict(prev_tag_data)
+                tag_data['fetch_error'] = failed_tag_data.get('fetch_error', 'Location fetch failed')
+                tag_data['consecutive_fetch_failures'] = failures
+                tag_data['fmm_request_history'] = failed_tag_data.get(
+                    'fmm_request_history', tag_data.get('fmm_request_history', [])
+                )
+                tag_data['fmm_api_calls_last_update'] = new_api_calls
+                tag_data['fmm_api_calls_total'] = self.device['_fmm_api_calls_total']
                 # tag_data now has location_found=True from the fallback, but this
                 # specific button press did NOT get a fresh fix - attempt_succeeded
                 # (computed above, before the fallback) correctly stays False so the

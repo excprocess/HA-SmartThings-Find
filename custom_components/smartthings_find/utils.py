@@ -243,53 +243,6 @@ def _decrypt_auth_value(value: str, key: str) -> str | None:
         return None
 
 
-def _country_to_iso3(country: str | None) -> str:
-    if not country:
-        return "USA"
-    country = country.upper()
-    if len(country) == 3:
-        return country
-    if len(country) != 2:
-        return country
-    try:
-        import pycountry  # type: ignore
-        entry = pycountry.countries.get(alpha_2=country)
-        if entry and entry.alpha_3:
-            return entry.alpha_3
-    except Exception:
-        pass
-    fallback = {
-        "US": "USA",
-        "DE": "DEU",
-        "GB": "GBR",
-        "UK": "GBR",
-        "AT": "AUT",
-        "CH": "CHE",
-        "NL": "NLD",
-        "FR": "FRA",
-        "ES": "ESP",
-        "IT": "ITA",
-        "PL": "POL",
-    }
-    return fallback.get(country, country)
-
-
-def _get_find_headers(hass: HomeAssistant, entry_id: str) -> dict[str, str]:
-    data_store = hass.data[DOMAIN][entry_id]
-    auth_server_url = str(data_store.get(CONF_AUTH_SERVER_URL, ""))
-    if auth_server_url.startswith("https://"):
-        auth_server_url = auth_server_url[len("https://"):]
-    elif auth_server_url.startswith("http://"):
-        auth_server_url = auth_server_url[len("http://"):]
-    return {
-        "X-Sec-Sa-Userid": str(data_store.get(CONF_USER_ID, "")),
-        "X-Sec-Sa-Countrycode": _country_to_iso3(hass.config.country),
-        "X-Sec-Sa-Authserverurl": auth_server_url,
-        "X-Sec-Sa-Authtoken": str(data_store.get(CONF_ACCESS_TOKEN, "")),
-        "Accept": "application/json",
-    }
-
-
 def _get_timezone_offset() -> str:
     offset = datetime.now().astimezone().utcoffset()
     if offset is None:
@@ -1078,21 +1031,6 @@ async def _refresh_token(
     except Exception as e:
         _LOGGER.error(f"Error refreshing token: {e}")
         raise ConfigEntryAuthFailed(f"Error refreshing token: {e}")
-
-
-async def refresh_find_token(
-    hass: HomeAssistant,
-    session: aiohttp.ClientSession,
-    entry_id: str
-) -> str:
-    return await _refresh_token(
-        hass,
-        session,
-        entry_id,
-        CONF_REFRESH_TOKEN,
-        CONF_ACCESS_TOKEN,
-        CLIENT_ID_FIND
-    )
 
 
 async def refresh_iot_token(

@@ -178,7 +178,7 @@ class SmartThingsDeviceTracker(DeviceTrackerEntity, RestoreEntity):
         The API omits `accuracy` for some devices, so fall back to 0.
         """
         data = self.coordinator.data.get(self.device_id, {})
-        if data.get('location_found'):
+        if data.get('location_found') and not data.get('position_unknown'):
             return data.get('used_loc', {}).get('gps_accuracy') or 0
         return 0
 

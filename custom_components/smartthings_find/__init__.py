@@ -85,6 +85,21 @@ FRONTEND_URL_BASE = "/smartthings_find_frontend"
 FRONTEND_CARDS_JS = "smartthings-find-cards.js"
 
 
+def _read_frontend_card_info(integration_dir: Path) -> tuple[bool, str]:
+    """Read frontend bundle presence and version off the event loop."""
+    has_js = (integration_dir / "frontend" / FRONTEND_CARDS_JS).is_file()
+    version = "8.5.10"
+    if not has_js:
+        return False, version
+    manifest_path = integration_dir / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            version = json.loads(manifest_path.read_text(encoding="utf-8")).get("version", version)
+        except Exception:
+            pass
+    return True, version
+
+
 async def _async_register_frontend_cards(hass: HomeAssistant) -> None:
     """Serve and auto-register the bundled Lovelace cards once per HA instance."""
     domain_data = hass.data.setdefault(DOMAIN, {})
@@ -93,8 +108,13 @@ async def _async_register_frontend_cards(hass: HomeAssistant) -> None:
     http = getattr(hass, "http", None)
     if http is None:
         return
-    frontend_dir = Path(__file__).parent / "frontend"
-    if not (frontend_dir / FRONTEND_CARDS_JS).is_file():
+    integration_dir = Path(__file__).parent
+    frontend_dir = integration_dir / "frontend"
+    if hasattr(hass, "async_add_executor_job"):
+        has_js, version = await hass.async_add_executor_job(_read_frontend_card_info, integration_dir)
+    else:
+        has_js, version = _read_frontend_card_info(integration_dir)
+    if not has_js:
         return
     try:
         try:
@@ -104,14 +124,6 @@ async def _async_register_frontend_cards(hass: HomeAssistant) -> None:
             )
         except ImportError:
             http.register_static_path(FRONTEND_URL_BASE, str(frontend_dir), cache_headers=False)
-
-        version = "8.5.0"
-        manifest_path = Path(__file__).parent / "manifest.json"
-        if manifest_path.is_file():
-            try:
-                version = json.loads(manifest_path.read_text(encoding="utf-8")).get("version", version)
-            except Exception:
-                pass
 
         from homeassistant.components.frontend import add_extra_js_url
         add_extra_js_url(hass, f"{FRONTEND_URL_BASE}/{FRONTEND_CARDS_JS}?v={version}")
@@ -123,7 +135,7 @@ async def _async_register_frontend_cards(hass: HomeAssistant) -> None:
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the SmartThings Find component."""
-    hass.data[DOMAIN] = {}
+    hass.data.setdefault(DOMAIN, {})
     await _async_register_frontend_cards(hass)
     return True
 
