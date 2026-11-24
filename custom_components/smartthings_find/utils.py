@@ -152,6 +152,13 @@ def get_ha_device(hass: HomeAssistant, device_id: str):
     2027.8 deprecation warning on async_get_device(identifiers=...)."""
     registry = device_registry.async_get(hass)
     identifier = (DOMAIN, device_id)
+    get_devices_fn = getattr(registry, "async_get_devices", None)
+    if callable(get_devices_fn):
+        try:
+            matches = get_devices_fn(identifiers={identifier})
+            return next(iter(matches), None)
+        except TypeError:
+            pass
     get_by_id = getattr(registry, "async_get_device_by_identifier", None)
     if callable(get_by_id):
         try:
@@ -159,7 +166,7 @@ def get_ha_device(hass: HomeAssistant, device_id: str):
         except TypeError:
             pass
     devices = getattr(registry, "devices", None)
-    if isinstance(devices, dict):
+    if devices is not None and hasattr(devices, "values"):
         for dev in devices.values():
             if identifier in getattr(dev, "identifiers", set()):
                 return dev

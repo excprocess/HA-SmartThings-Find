@@ -46,7 +46,6 @@ class SmartThingsFindConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for SmartThings Find."""
 
     VERSION = 1
-    CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
 
     reauth_entry: ConfigEntry | None = None
     login_url: str | None = None

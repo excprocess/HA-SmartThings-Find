@@ -10,7 +10,7 @@
  * (stay/move grouping inspired by konewka17/timeline_card), and Material You Utilities tokens.
  */
 
-const CARD_VERSION = "8.5.10";
+const CARD_VERSION = "8.5.11";
 
 const ICON_REFRESH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>`;
 const ICON_RING_BELL = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/><path d="M2 8c0-2.2.7-4.3 2-6"/><path d="M22 8a10 10 0 0 0-2-6"/></svg>`;
@@ -76,6 +76,35 @@ function hasValidCoords(attrs) {
   return Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude));
 }
 
+let _colorCanvasCtx = null;
+
+function toHexColor(cssColor, fallbackHex) {
+  if (!cssColor || cssColor === "rgba(0, 0, 0, 0)" || cssColor === "transparent") {
+    return fallbackHex;
+  }
+  if (/^#[0-9a-fA-F]{6}$/.test(cssColor)) return cssColor;
+  try {
+    if (!_colorCanvasCtx) {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      _colorCanvasCtx = canvas.getContext("2d", { willReadFrequently: true });
+    }
+    if (_colorCanvasCtx) {
+      _colorCanvasCtx.clearRect(0, 0, 1, 1);
+      _colorCanvasCtx.fillStyle = "#000000";
+      _colorCanvasCtx.fillStyle = cssColor;
+      _colorCanvasCtx.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = _colorCanvasCtx.getImageData(0, 0, 1, 1).data;
+      if (a > 0) {
+        const hex = (n) => n.toString(16).padStart(2, "0");
+        return `#${hex(r)}${hex(g)}${hex(b)}`;
+      }
+    }
+  } catch (_e) {}
+  return fallbackHex;
+}
+
 function resolveCssColor(containerEl, cssColorExpr, fallbackHex) {
   if (!containerEl) return fallbackHex;
   try {
@@ -86,8 +115,8 @@ function resolveCssColor(containerEl, cssColorExpr, fallbackHex) {
     containerEl.appendChild(probe);
     const resolved = getComputedStyle(probe).color;
     probe.remove();
-    if (resolved && !resolved.startsWith("var(") && resolved !== "rgba(0, 0, 0, 0)") {
-      return resolved;
+    if (resolved && !resolved.startsWith("var(")) {
+      return toHexColor(resolved, fallbackHex);
     }
   } catch (_e) {}
   return fallbackHex;
@@ -732,12 +761,12 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     this._rawTrailPoints = [];
     this._selectedIdx = 0;
     this._mapEl = null;
-    this._renderShell();
     const haEl = document.querySelector("home-assistant");
     const mountRoot = (haEl && haEl.shadowRoot) || haEl || document.body;
     if (this.parentNode !== mountRoot) {
       mountRoot.appendChild(this);
     }
+    this._renderShell();
     window.addEventListener("keydown", this._onKeyDown);
     this._loadDayHistory();
   }
@@ -766,7 +795,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
         :host {
           position: fixed;
           inset: 0;
-          z-index: 9999;
+          z-index: 99999;
           isolation: auto;
           display: flex;
           align-items: center;
@@ -1258,9 +1287,9 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
       const map = document.createElement("ha-map");
       map.hass = this._hass;
       map.darkMode = darkMode;
-      map.themeMode = darkMode ? "dark" : "light";
+      map.themeMode = "auto";
       map.zoom = 15;
-      map.autoFit = true;
+      map.autoFit = false;
       map.fitZones = false;
       map.interactiveZones = false;
       map.clusterMarkers = false;
@@ -1284,19 +1313,31 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
   }
 
   _createStopMarkerEl(isActive, accent, isDark) {
+    // IMPORTANT: Do NOT set `position` on the outer element — MapLibre GL's `.maplibregl-marker`
+    // requires `position: absolute; top: 0; left: 0;` to anchor `transform: translate(...)`.
     const el = document.createElement("div");
+    el.style.width = isActive ? "34px" : "16px";
+    el.style.height = isActive ? "34px" : "16px";
+    el.style.display = "flex";
+    el.style.alignItems = "center";
+    el.style.justifyContent = "center";
+    el.style.cursor = "pointer";
     if (isActive) {
-      el.style.cssText =
-        "position:relative;width:34px;height:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;";
+      const wrap = document.createElement("span");
+      wrap.style.cssText =
+        "position:relative;width:34px;height:34px;display:flex;align-items:center;justify-content:center;pointer-events:none;";
       const halo = document.createElement("span");
-      halo.style.cssText = `position:absolute;inset:0;border-radius:9999px;background:${accent};opacity:0.26;pointer-events:none;`;
+      halo.style.cssText = `position:absolute;inset:0;border-radius:9999px;background:${accent};opacity:0.28;`;
       const dot = document.createElement("span");
-      dot.style.cssText = `position:relative;width:18px;height:18px;border-radius:9999px;background:${accent};border:3px solid #ffffff;box-shadow:0 2px 8px rgba(0,0,0,0.38);box-sizing:border-box;`;
-      el.appendChild(halo);
-      el.appendChild(dot);
+      dot.style.cssText = `position:relative;width:18px;height:18px;border-radius:9999px;background:${accent};border:3px solid #ffffff;box-shadow:0 2px 8px rgba(0,0,0,0.42);box-sizing:border-box;`;
+      wrap.appendChild(halo);
+      wrap.appendChild(dot);
+      el.appendChild(wrap);
     } else {
       const fill = isDark ? "#1E1F24" : "#FFFFFF";
-      el.style.cssText = `width:16px;height:16px;border-radius:9999px;background:${fill};border:3px solid ${accent};box-shadow:0 1px 5px rgba(0,0,0,0.32);box-sizing:border-box;cursor:pointer;`;
+      const dot = document.createElement("span");
+      dot.style.cssText = `width:16px;height:16px;border-radius:9999px;background:${fill};border:3px solid ${accent};box-shadow:0 1px 5px rgba(0,0,0,0.36);box-sizing:border-box;pointer-events:none;`;
+      el.appendChild(dot);
     }
     return el;
   }
@@ -1328,7 +1369,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
     const darkMode = isDarkMode(this._hass);
     map.hass = this._hass;
     map.darkMode = darkMode;
-    map.themeMode = darkMode ? "dark" : "light";
+    map.themeMode = "auto";
     map.fitZones = false;
     map.interactiveZones = false;
     map.clusterMarkers = false;
@@ -1346,7 +1387,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
       }
       map.entities = [this._entityId];
       map.autoFit = true;
-      map.zoom = 15;
+      if (map.zoom !== 15) map.zoom = 15;
       try {
         if (typeof map.fitMap === "function") {
           map.fitMap({ unpause_autofit: true, zoom: 15 });
@@ -1382,6 +1423,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
 
     // Case 1: Modern HA (2026.10+) supporting fitBounds + editableLocations + Lit Context
     if (typeof map.fitBounds === "function" && typeof map.setView === "function") {
+      map.autoFit = false;
       map.entities = [];
       map.paths = buildPaths();
 
@@ -1395,24 +1437,31 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
       }
       map.editableLocations = locations;
 
-      if (fitAll) {
-        const allPts =
-          pathPoints.length >= 2
-            ? pathPoints.map((p) => p.point)
-            : this._stops.map((s) => [s.lat, s.lon]);
-        map.fitBounds(allPts, {
-          zoom: allPts.length > 1 ? 16 : 15,
-          pad: 0.25,
-          padding: FIT_PADDING_HISTORY,
-          fly: false,
-        });
-      } else if (activeStop) {
-        map.fitBounds([[activeStop.lat, activeStop.lon]], {
-          zoom: 16,
-          pad: 0.25,
-          padding: FIT_PADDING_HISTORY,
-          fly: true,
-        });
+      const applyFit = () => {
+        if (!this.isConnected || this._mapEl !== map) return;
+        if (fitAll) {
+          const allPts =
+            pathPoints.length >= 2
+              ? pathPoints.map((p) => p.point)
+              : this._stops.map((s) => [s.lat, s.lon]);
+          map.fitBounds(allPts, {
+            zoom: allPts.length > 1 ? 16 : 15,
+            pad: 0.25,
+            padding: FIT_PADDING_HISTORY,
+            fly: false,
+          });
+        } else if (activeStop) {
+          map.fitBounds([[activeStop.lat, activeStop.lon]], {
+            zoom: 16,
+            pad: 0.25,
+            padding: FIT_PADDING_HISTORY,
+            fly: true,
+          });
+        }
+      };
+      applyFit();
+      if (map.updateComplete && typeof map.updateComplete.then === "function") {
+        map.updateComplete.then(applyFit);
       }
       return;
     }
@@ -1639,6 +1688,7 @@ class SmartThingsFindHistoryDialog extends HTMLElement {
   }
 
   _renderTimeline() {
+    this._btnFitRoute?.classList.toggle("hidden", this._stops.length < 2);
     if (!this._stops.length) {
       this._listEl.innerHTML = `<div class="tl-empty">No location history recorded for this day.</div>`;
       return;
@@ -2051,8 +2101,8 @@ class SmartThingsFindDeviceCard extends HTMLElement {
     const targetZoom = Number(this._config.default_zoom) || 15;
     this._mapEl.hass = this._hass;
     this._mapEl.darkMode = dark;
-    this._mapEl.themeMode = dark ? "dark" : "light";
-    this._mapEl.zoom = targetZoom;
+    this._mapEl.themeMode = "auto";
+    if (this._mapEl.zoom !== targetZoom) this._mapEl.zoom = targetZoom;
     this._mapEl.autoFit = true;
     this._mapEl.fitZones = false;
     this._mapEl.interactiveZones = false;
@@ -2635,8 +2685,8 @@ class SmartThingsFindCarouselCard extends HTMLElement {
 
     this._mapEl.hass = this._hass;
     this._mapEl.darkMode = dark;
-    this._mapEl.themeMode = dark ? "dark" : "light";
-    this._mapEl.zoom = targetZoom;
+    this._mapEl.themeMode = "auto";
+    if (this._mapEl.zoom !== targetZoom) this._mapEl.zoom = targetZoom;
     this._mapEl.autoFit = true;
     this._mapEl.fitZones = false;
     this._mapEl.interactiveZones = false;

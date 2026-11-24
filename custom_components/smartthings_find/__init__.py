@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -86,10 +87,10 @@ FRONTEND_CARDS_JS = "smartthings-find-cards.js"
 
 
 def _read_frontend_card_info(integration_dir: Path) -> tuple[bool, str]:
-    """Read frontend bundle presence and version off the event loop."""
-    has_js = (integration_dir / "frontend" / FRONTEND_CARDS_JS).is_file()
-    version = "8.5.10"
-    if not has_js:
+    """Read frontend bundle presence and content-hashed cache tag off the event loop."""
+    js_path = integration_dir / "frontend" / FRONTEND_CARDS_JS
+    version = "8.5.11"
+    if not js_path.is_file():
         return False, version
     manifest_path = integration_dir / "manifest.json"
     if manifest_path.is_file():
@@ -97,7 +98,12 @@ def _read_frontend_card_info(integration_dir: Path) -> tuple[bool, str]:
             version = json.loads(manifest_path.read_text(encoding="utf-8")).get("version", version)
         except Exception:
             pass
-    return True, version
+    try:
+        digest = hashlib.sha256(js_path.read_bytes()).hexdigest()[:8]
+        cache_tag = f"{version}-{digest}"
+    except Exception:
+        cache_tag = version
+    return True, cache_tag
 
 
 async def _async_register_frontend_cards(hass: HomeAssistant) -> None:
